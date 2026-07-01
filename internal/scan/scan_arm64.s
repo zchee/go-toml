@@ -27,7 +27,8 @@
 // "Find first non-match" kernels use the same RBIT+CLZ sequence as match
 // kernels after constructing an invalid-byte mask. ScanBareKey classifies
 // bytes with low/high-nibble VTBL lookups; SkipWhitespace builds a membership
-// mask with equality compares and then inverts it with VNOT.
+// mask with equality compares and then inverts it with VMVN (emitted
+// as a WORD encoding for Go 1.26 assembler compatibility; see note below).
 //
 // Common register layout (per-kernel deviations noted in comments):
 //
@@ -41,6 +42,22 @@
 //   V9..V14 — working membership masks
 //
 // Frame layout for func(s []byte) int: ptr+0, len+8, cap+16, ret+24 → $0-32.
+//
+// Go 1.26 assembler compatibility: this file targets the Go 1.26
+// toolchain, whose ARM64 assembler does not recognize the VMVN (NEON NOT)
+// or VCMHS (unsigned compare higher-or-same) mnemonics; both were added in
+// Go 1.27. Those instructions are emitted here as raw WORD encodings with
+// the original mnemonic in a trailing comment. The encodings are the exact
+// bytes the Go 1.27 assembler produces for the same operands (verified by
+// round-trip objdump), so behavior is identical on every toolchain:
+//
+//   WORD $0x6e2058c6  // VMVN  V6.B16, V6.B16
+//   WORD $0x6e2058e7  // VMVN  V7.B16, V7.B16
+//   WORD $0x6e2059ad  // VMVN  V13.B16, V13.B16
+//   WORD $0x6e213c46  // VCMHS V1.B16, V2.B16, V6.B16
+//   WORD $0x6e213c67  // VCMHS V1.B16, V3.B16, V7.B16
+//   WORD $0x6e213d2c  // VCMHS V1.B16, V9.B16, V12.B16
+//   WORD $0x6e223d2c  // VCMHS V2.B16, V9.B16, V12.B16
 
 // ============================================================================
 // scanBareKeyNEON — first index whose byte is NOT in [A-Za-z0-9_-], or len(s).
@@ -351,11 +368,11 @@ ws_loop32:
 	VCMEQ  V1.B16, V3.B16, V6.B16
 	VCMEQ  V2.B16, V3.B16, V8.B16
 	VORR   V8.B16, V6.B16, V6.B16
-	VNOT   V6.B16, V6.B16
+	WORD   $0x6e2058c6            // VMVN V6.B16, V6.B16
 	VCMEQ  V1.B16, V4.B16, V7.B16
 	VCMEQ  V2.B16, V4.B16, V8.B16
 	VORR   V8.B16, V7.B16, V7.B16
-	VNOT   V7.B16, V7.B16
+	WORD   $0x6e2058e7            // VMVN V7.B16, V7.B16
 	VORR   V7.B16, V6.B16, V8.B16
 	VADDP  V8.D2, V8.D2, V8.D2
 	VMOV   V8.D[0], R6
@@ -495,8 +512,8 @@ u8_loop32:
 	BLT    u8_tail
 	VLD1.P (R0), [V2.B16, V3.B16]
 	SUB    $32, R1, R1
-	VCMHS  V1.B16, V2.B16, V6.B16
-	VCMHS  V1.B16, V3.B16, V7.B16
+	WORD   $0x6e213c46            // VCMHS V1.B16, V2.B16, V6.B16
+	WORD   $0x6e213c67            // VCMHS V1.B16, V3.B16, V7.B16
 	VORR   V7.B16, V6.B16, V8.B16
 	VADDP  V8.D2, V8.D2, V8.D2
 	VMOV   V8.D[0], R6
@@ -579,9 +596,9 @@ strict_loop32:
 	VORR  V6.B16, V3.B16, V3.B16
 	VCMEQ V8.B16, V1.B16, V6.B16
 	VORR  V6.B16, V3.B16, V3.B16
-	VCMHS V1.B16, V9.B16, V12.B16   // byte <= 0x1f
+	WORD  $0x6e213d2c               // VCMHS V1.B16, V9.B16, V12.B16 (byte <= 0x1f)
 	VCMEQ V10.B16, V1.B16, V13.B16
-	VNOT  V13.B16, V13.B16
+	WORD  $0x6e2059ad               // VMVN V13.B16, V13.B16
 	VAND  V13.B16, V12.B16, V12.B16 // control and not tab
 	VORR  V12.B16, V3.B16, V3.B16
 
@@ -591,9 +608,9 @@ strict_loop32:
 	VORR  V6.B16, V4.B16, V4.B16
 	VCMEQ V8.B16, V2.B16, V6.B16
 	VORR  V6.B16, V4.B16, V4.B16
-	VCMHS V2.B16, V9.B16, V12.B16
+	WORD  $0x6e223d2c               // VCMHS V2.B16, V9.B16, V12.B16
 	VCMEQ V10.B16, V2.B16, V13.B16
-	VNOT  V13.B16, V13.B16
+	WORD  $0x6e2059ad               // VMVN V13.B16, V13.B16
 	VAND  V13.B16, V12.B16, V12.B16
 	VORR  V12.B16, V4.B16, V4.B16
 
@@ -679,16 +696,16 @@ cmt_loop32:
 	SUB    $32, R1, R1
 
 	VCMEQ V8.B16, V1.B16, V3.B16
-	VCMHS V1.B16, V9.B16, V12.B16
+	WORD  $0x6e213d2c               // VCMHS V1.B16, V9.B16, V12.B16
 	VCMEQ V10.B16, V1.B16, V13.B16
-	VNOT  V13.B16, V13.B16
+	WORD  $0x6e2059ad               // VMVN V13.B16, V13.B16
 	VAND  V13.B16, V12.B16, V12.B16
 	VORR  V12.B16, V3.B16, V3.B16
 
 	VCMEQ V8.B16, V2.B16, V4.B16
-	VCMHS V2.B16, V9.B16, V12.B16
+	WORD  $0x6e223d2c               // VCMHS V2.B16, V9.B16, V12.B16
 	VCMEQ V10.B16, V2.B16, V13.B16
-	VNOT  V13.B16, V13.B16
+	WORD  $0x6e2059ad               // VMVN V13.B16, V13.B16
 	VAND  V13.B16, V12.B16, V12.B16
 	VORR  V12.B16, V4.B16, V4.B16
 
