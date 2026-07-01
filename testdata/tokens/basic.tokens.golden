@@ -1,0 +1,10 @@
+{"kind":"Key","text":"name","line":1,"col":1}
+{"kind":"ValueString","text":"\"Alice\"","line":1,"col":8}
+{"kind":"Key","text":"active","line":2,"col":1}
+{"kind":"ValueBool","text":"true","line":2,"col":9}
+{"kind":"TableHeader","text":"[server]","line":3,"col":1}
+{"kind":"Key","text":"ports","line":4,"col":1}
+{"kind":"ArrayStart","text":"[","line":4,"col":8}
+{"kind":"ValueInteger","text":"80","line":4,"col":8}
+{"kind":"ValueInteger","text":"443","line":4,"col":12}
+{"kind":"ArrayEnd","text":"]","line":4,"col":15}

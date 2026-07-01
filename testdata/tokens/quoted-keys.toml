@@ -1,0 +1,3 @@
+"service-name" = "auth"
+"quoted.key" = 42
+table."inner-key" = "v"

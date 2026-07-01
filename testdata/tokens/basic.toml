@@ -1,0 +1,4 @@
+name = "Alice"
+active = true
+[server]
+ports = [80, 443]

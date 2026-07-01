@@ -1,0 +1,5 @@
+{"kind":"Key","text":"entry","line":1,"col":1}
+{"kind":"InlineTableStart","text":"{","line":1,"col":8}
+{"kind":"Key","text":"name","line":1,"col":9}
+{"kind":"ValueString","text":"\"core\"","line":1,"col":14}
+{"kind":"InlineTableEnd","text":"}","line":1,"col":21}

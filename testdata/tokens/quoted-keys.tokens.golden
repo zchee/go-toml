@@ -1,0 +1,6 @@
+{"kind":"Key","text":"\"service-name\"","line":1,"col":1}
+{"kind":"ValueString","text":"\"auth\"","line":1,"col":16}
+{"kind":"Key","text":"\"quoted.key\"","line":2,"col":1}
+{"kind":"ValueInteger","text":"42","line":2,"col":15}
+{"kind":"Key","text":"table.\"inner-key\"","line":3,"col":1}
+{"kind":"ValueString","text":"\"v\"","line":3,"col":19}

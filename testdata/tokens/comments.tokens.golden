@@ -1,0 +1,6 @@
+{"kind":"Comment","text":"# top comment","line":1,"col":1}
+{"kind":"Key","text":"name","line":2,"col":1}
+{"kind":"ValueString","text":"\"Alice\"","line":2,"col":7}
+{"kind":"Comment","text":"# row comment","line":3,"col":1}
+{"kind":"Key","text":"active","line":4,"col":1}
+{"kind":"ValueBool","text":"false","line":4,"col":9}
