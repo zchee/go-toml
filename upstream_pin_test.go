@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	wantGoModDirective = "go 1.27"
+	wantGoModDirective = "go 1.26"
 	wantCargoLockSHA   = "9ea94b60b3ee80c73f52186946bb280dc41c7287bbb678988618a6839533dbe9"
 	wantCargoLockBytes = 103263
 )

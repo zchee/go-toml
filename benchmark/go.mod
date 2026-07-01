@@ -2,7 +2,7 @@ module github.com/zchee/go-toml/benchmark
 
 replace github.com/zchee/go-toml => ../
 
-go 1.27
+go 1.26
 
 require (
 	github.com/BurntSushi/toml v1.6.1-0.20260415162929-b66ba2a06c25
