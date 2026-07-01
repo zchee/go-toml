@@ -58,8 +58,8 @@ type benchScalar struct {
 var benchCargoValue = mustDecodeBenchCargo()
 
 var (
-	benchCargoMarshalPelletierSize    = len(mustMarshalPelletierBenchCargo())
-	benchCargoMarshalPandaemoniumSize = len(mustMarshalPandaemoniumBenchCargo())
+	benchCargoMarshalPelletierSize = len(mustMarshalPelletierBenchCargo())
+	benchCargoMarshalGoTOMLSize    = len(mustMarshalGoTOMLBenchCargo())
 )
 
 var (
@@ -94,7 +94,7 @@ func BenchmarkUnmarshal_Pelletier(b *testing.B) {
 	}
 }
 
-func BenchmarkUnmarshal_Pandaemonium(b *testing.B) {
+func BenchmarkUnmarshal_GoTOML(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(benchCargoLock)))
 	for b.Loop() {
@@ -118,9 +118,9 @@ func BenchmarkMarshal_Pelletier(b *testing.B) {
 	}
 }
 
-func BenchmarkMarshal_Pandaemonium(b *testing.B) {
+func BenchmarkMarshal_GoTOML(b *testing.B) {
 	b.ReportAllocs()
-	b.SetBytes(int64(benchCargoMarshalPandaemoniumSize))
+	b.SetBytes(int64(benchCargoMarshalGoTOMLSize))
 	for b.Loop() {
 		body, err := simdtoml.Marshal(&benchCargoValue)
 		if err != nil {
@@ -142,7 +142,7 @@ func BenchmarkScalarUnmarshal_Pelletier(b *testing.B) {
 	}
 }
 
-func BenchmarkScalarUnmarshal_Pandaemonium(b *testing.B) {
+func BenchmarkScalarUnmarshal_GoTOML(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(benchScalarDocument)))
 	for b.Loop() {
@@ -166,7 +166,7 @@ func BenchmarkArrayTableUnmarshal_Pelletier(b *testing.B) {
 	}
 }
 
-func BenchmarkArrayTableUnmarshal_Pandaemonium(b *testing.B) {
+func BenchmarkArrayTableUnmarshal_GoTOML(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(benchCargoLock)))
 	for b.Loop() {
@@ -190,7 +190,7 @@ func BenchmarkUnmarshalReferenceMap_Pelletier(b *testing.B) {
 	}
 }
 
-func BenchmarkUnmarshalReferenceMap_Pandaemonium(b *testing.B) {
+func BenchmarkUnmarshalReferenceMap_GoTOML(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(benchReferenceFile)))
 	for b.Loop() {
@@ -214,7 +214,7 @@ func BenchmarkUnmarshalHugoMap_Pelletier(b *testing.B) {
 	}
 }
 
-func BenchmarkUnmarshalHugoMap_Pandaemonium(b *testing.B) {
+func BenchmarkUnmarshalHugoMap_GoTOML(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(hugoFrontMatterbytes)))
 	for b.Loop() {
@@ -227,11 +227,11 @@ func BenchmarkUnmarshalHugoMap_Pandaemonium(b *testing.B) {
 }
 
 func BenchmarkDocumentEdit(b *testing.B) {
-	benchmarkDocumentEditPandaemonium(b)
+	benchmarkDocumentEditGoTOML(b)
 }
 
-func BenchmarkDocumentEdit_Pandaemonium(b *testing.B) {
-	benchmarkDocumentEditPandaemonium(b)
+func BenchmarkDocumentEdit_GoTOML(b *testing.B) {
+	benchmarkDocumentEditGoTOML(b)
 }
 
 func BenchmarkDocumentEdit_Pelletier(b *testing.B) {
@@ -251,7 +251,7 @@ func BenchmarkDocumentEdit_Pelletier(b *testing.B) {
 	}
 }
 
-func benchmarkDocumentEditPandaemonium(b *testing.B) {
+func benchmarkDocumentEditGoTOML(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(benchCargoLock)))
 	for b.Loop() {
@@ -301,7 +301,7 @@ func mustMarshalPelletierBenchCargo() []byte {
 	return body
 }
 
-func mustMarshalPandaemoniumBenchCargo() []byte {
+func mustMarshalGoTOMLBenchCargo() []byte {
 	body, err := simdtoml.Marshal(&benchCargoValue)
 	if err != nil {
 		panic(err)
