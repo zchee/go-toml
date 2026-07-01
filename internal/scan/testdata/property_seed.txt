@@ -1,0 +1,18 @@
+# pkg/toml/internal/scan property-test seed.
+#
+# Format: one decimal int64 on the first non-comment, non-blank line.
+# Read by property_test.go (TestProperty_*) to drive the PCG PRNG.
+# Each scan uses (seed, FNV-1a-of-test-label) as the (state, stream)
+# pair so re-ordering tests does not perturb any one scan's inputs.
+#
+# Bumping this value is a deliberate, dedicated commit:
+#   - capture failing seeds discovered by fuzz / CI on the same line
+#     comment, then choose a new int64 that triggers the same family
+#     of cases.
+#   - confirm `go test -count=1 -run TestProperty_ ./pkg/toml/internal/scan/`
+#     stays green across all backends (SWAR, SSE2, AVX2, NEON) under
+#     the new seed before merging.
+#
+# History
+#   2026-05-16  initial seed (Phase 1 / T1).
+1737072000000000000
