@@ -374,7 +374,15 @@ func (d *Decoder) readToken() (rawToken, error) {
 func (d *Decoder) skipSpaces() {
 	for d.off < len(d.buf) {
 		rem := d.buf[d.off:]
-		n := scan.SkipWhitespace(rem)
+		// Inline first-byte guard: only pay the scan.SkipWhitespace kernel
+		// call when there is actually a space or tab to skip. Most tokens are
+		// separated by a single space (or none), so this avoids an indirect
+		// call per token for the common case. rem is non-empty by the loop
+		// condition.
+		var n int
+		if b := rem[0]; b == ' ' || b == '\t' {
+			n = scan.SkipWhitespace(rem)
+		}
 		if n > 0 {
 			wasAtLineStart := d.atLineStart
 			d.advanceBytes(rem[:n])
@@ -446,6 +454,32 @@ func (d *Decoder) scanCommentEnd(start int) (int, error) {
 //nolint:cyclop // bare/quoted/dotted key scan with inline limit checks; cohesive.
 func (d *Decoder) scanKeyToken() (rawToken, error) {
 	start := d.off
+	// Fast path for a simple bare key immediately followed by '='. The
+	// scan.ScanBareKey kernel consumes exactly the TOML bare-key class
+	// [A-Za-z0-9_-] (identical to isSimpleBareKey), so a run of length n>0
+	// whose next non-blank byte is '=' is a valid simple key that needs no
+	// bytesTrimRightSpaces trim and no isSimpleBareKey re-validation. Dotted
+	// and quoted keys fall through to the general scan below.
+	if n := scan.ScanBareKey(d.buf[start:]); n > 0 {
+		eq := start + n
+		for eq < len(d.buf) && (d.buf[eq] == ' ' || d.buf[eq] == '\t') {
+			eq++
+		}
+		if eq < len(d.buf) && d.buf[eq] == '=' {
+			key := d.buf[start : start+n]
+			if len(key) > d.limits.MaxKeyLength {
+				err := &LimitError{Limit: "MaxKeyLength", Value: d.limits.MaxKeyLength, Span: [2]int{start, start + n}}
+				d.setErr(err)
+				return rawToken{}, err
+			}
+			tok := d.makeToken(TokenKindKey, key, start, tokenScalar{})
+			d.advanceBytes(d.buf[start : eq+1])
+			d.expectingValue = true
+			d.valueNoNewline = true
+			d.needLineEnd = false
+			return tok, nil
+		}
+	}
 	i := start
 	for i < len(d.buf) {
 		ch := d.buf[i]
