@@ -79,7 +79,6 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 			if err != nil {
 				return nil, err
 			}
-			pathKey := strings.Join(path, ".")
 			encodedPathKey := encodedKeyPath(path)
 			declContext := declarationContext(path, arrayTableEpochs)
 			if _, ok := arrayTables[encodedPathKey]; ok {
@@ -97,7 +96,7 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 			if nextFilter, ok := filter.lookupPath(path); ok {
 				next, err := ensureTableRaw(data, root, path, tok)
 				if err != nil {
-					return nil, bindErrorPath(err, pathKey)
+					return nil, bindErrorPath(err, strings.Join(path, "."))
 				}
 				current = next
 				currentPath = append(currentPath[:0], path...)
@@ -118,7 +117,6 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 			if err != nil {
 				return nil, err
 			}
-			pathKey := strings.Join(path, ".")
 			encodedPathKey := encodedKeyPath(path)
 			if _, ok := declaredTables[encodedPathKey]; ok {
 				return nil, semanticSyntaxErrorRaw(data, tok, "cannot redefine table as array table")
@@ -150,7 +148,7 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 					next, err = appendArrayTableRaw(data, root, path, tok)
 				}
 				if err != nil {
-					return nil, bindErrorPath(err, pathKey)
+					return nil, bindErrorPath(err, strings.Join(path, "."))
 				}
 				current = next
 				currentPath = append(currentPath[:0], path...)
@@ -174,12 +172,39 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 				}
 				continue
 			}
+			if isSimpleBareKey(tok.Bytes) {
+				// Fast path: a bare key is a single component, so it binds without
+				// the one-element []string that keyPath allocates. Its only assign
+				// error is a duplicate key, a *SyntaxError that bindErrorPath leaves
+				// untouched, so no path string is needed either. fullPath is built
+				// lazily only when the value opens an inline-table/array scope.
+				name := string(tok.Bytes)
+				value, err := parseNextValue(dec)
+				if err != nil {
+					return nil, err
+				}
+				if _, exists := current[name]; exists {
+					return nil, semanticSyntaxErrorRaw(data, tok, "duplicate key")
+				}
+				current[name] = value
+				switch value.(type) {
+				case documentMap, []any:
+					fullPath := append(append([]string(nil), currentPath...), name)
+					closedInlineTables = markClosedValuePaths(closedInlineTables, fullPath, value, arrayTableEpochs)
+				}
+				continue
+			}
 			key, err := keyPath(tok.Bytes)
 			if err != nil {
 				return nil, err
 			}
-			fullPath := append(append([]string(nil), currentPath...), key...)
+			// Only dotted keys need the joined fullPath (for extension checks and
+			// dotted-table bookkeeping). A simple key never extends a dotted table
+			// and only seals inline scopes when its value is an inline table or an
+			// array, so it builds fullPath lazily on those rarer paths and avoids a
+			// per-key slice allocation in the common scalar case.
 			if len(key) > 1 {
+				fullPath := append(append([]string(nil), currentPath...), key...)
 				for i := len(currentPath) + 1; i < len(fullPath); i++ {
 					prefix := encodedKeyPath(fullPath[:i])
 					if _, ok := declaredTables[prefix]; ok {
@@ -189,16 +214,30 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 						return nil, semanticSyntaxErrorRaw(data, tok, "cannot extend inline table")
 					}
 				}
+				value, err := parseNextValue(dec)
+				if err != nil {
+					return nil, err
+				}
+				if err := assignUniqueRaw(data, current, key, value, tok); err != nil {
+					return nil, bindErrorPath(err, strings.Join(fullPath, "."))
+				}
+				dottedKeyTables = markDottedKeyTables(dottedKeyTables, fullPath, len(currentPath), arrayTableEpochs)
+				closedInlineTables = markClosedValuePaths(closedInlineTables, fullPath, value, arrayTableEpochs)
+				continue
 			}
 			value, err := parseNextValue(dec)
 			if err != nil {
 				return nil, err
 			}
 			if err := assignUniqueRaw(data, current, key, value, tok); err != nil {
+				fullPath := append(append([]string(nil), currentPath...), key...)
 				return nil, bindErrorPath(err, strings.Join(fullPath, "."))
 			}
-			dottedKeyTables = markDottedKeyTables(dottedKeyTables, fullPath, len(currentPath), arrayTableEpochs)
-			closedInlineTables = markClosedValuePaths(closedInlineTables, fullPath, value, arrayTableEpochs)
+			switch value.(type) {
+			case documentMap, []any:
+				fullPath := append(append([]string(nil), currentPath...), key...)
+				closedInlineTables = markClosedValuePaths(closedInlineTables, fullPath, value, arrayTableEpochs)
+			}
 		default:
 			if !inTable {
 				return nil, syntaxErrorForRawToken(data, tok, "unexpected token")
@@ -1278,6 +1317,9 @@ func keyPath(raw []byte) ([]string, error) {
 }
 
 func declarationContext(path []string, arrayTableEpochs map[string]int) string {
+	if len(arrayTableEpochs) == 0 {
+		return ""
+	}
 	for i := len(path); i > 0; i-- {
 		prefix := encodedKeyPath(path[:i])
 		if epoch := arrayTableEpochs[prefix]; epoch > 0 {
@@ -1288,6 +1330,9 @@ func declarationContext(path []string, arrayTableEpochs map[string]int) string {
 }
 
 func closedInlinePrefix(path []string, closed map[string]string, arrayTableEpochs map[string]int) bool {
+	if len(closed) == 0 {
+		return false
+	}
 	for i := 1; i <= len(path); i++ {
 		prefix := path[:i]
 		if existingContext, ok := closed[encodedKeyPath(prefix)]; ok && existingContext == declarationContext(prefix, arrayTableEpochs) {
