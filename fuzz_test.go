@@ -36,6 +36,10 @@ func seedDecoderExamples(f *testing.F) {
 	f.Add([]byte("bad = \"unterminated\n"))
 	f.Add([]byte("x = 1_2_3\n"))
 	f.Add([]byte(strings.Repeat("a", 64)))
+	// Regression: a value line ending in a bare carriage return (CR not part
+	// of a CRLF) once spun the tokenizer forever; it must now be a syntax
+	// error. See TestDecoderBareCarriageReturn.
+	f.Add([]byte("0=0E0\r0"))
 }
 
 func FuzzDecoder(f *testing.F) {

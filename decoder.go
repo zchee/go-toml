@@ -304,11 +304,24 @@ func (d *Decoder) readToken() (rawToken, error) {
 			return rawToken{}, io.EOF
 		}
 
+		// A bare carriage return (CR not part of a CRLF) is invalid per the
+		// TOML spec. skipSpaces intentionally never advances past a lone CR,
+		// so reject it here before any dispatch would spin on the unconsumed
+		// byte. This guard sits ahead of the needLineEnd branch below, whose
+		// '\r' case is reached only for a CRLF that skipSpaces already
+		// consumed the CR of when a newline was expected.
+		if d.buf[d.off] == '\r' && (d.off+1 >= len(d.buf) || d.buf[d.off+1] != '\n') {
+			return rawToken{}, d.syntaxError("bare carriage return", d.off)
+		}
+
 		if d.needLineEnd {
 			switch d.buf[d.off] {
 			case '#':
 				return d.scanComment()
-			case '\n', '\r':
+			case '\n':
+				// A CRLF is consumed by skipSpaces above, and the bare-CR
+				// guard already rejected a lone '\r', so only '\n' remains as
+				// the valid line terminator to skip here.
 				continue
 			default:
 				return rawToken{}, d.syntaxError("expected newline", d.off)
