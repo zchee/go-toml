@@ -424,16 +424,34 @@ func typeName(src any) string {
 	return reflect.TypeOf(src).String()
 }
 
-func lookupStructField(info *reflectcache.TypeInfo, name string) (reflectcache.Field, bool) {
-	if field, ok := info.ByName[name]; ok {
-		return field, true
+// lookupStructField is the string-keyed counterpart of lookupStructFieldBytes,
+// using the same exact/alias-then-fallback precedence. It returns a pointer
+// into info.Fields (no Field copy) and, matching info.ByName, applies the
+// unicode strings.EqualFold fallback rather than the ASCII one.
+func lookupStructField(info *reflectcache.TypeInfo, name string) (*reflectcache.Field, bool) {
+	fields := info.Fields
+	if len(fields) <= smallStructFieldLimit {
+		for i := range fields {
+			if fields[i].Name == name || info.LowerNames[i] == name {
+				return &fields[i], true
+			}
+		}
+		for i := range fields {
+			if strings.EqualFold(fields[i].Name, name) {
+				return &fields[i], true
+			}
+		}
+		return nil, false
 	}
-	for _, field := range info.Fields {
-		if strings.EqualFold(field.Name, name) {
-			return field, true
+	if idx, ok := info.ByNameIndex[name]; ok {
+		return &fields[idx], true
+	}
+	for i := range fields {
+		if strings.EqualFold(fields[i].Name, name) {
+			return &fields[i], true
 		}
 	}
-	return reflectcache.Field{}, false
+	return nil, false
 }
 
 func bindErrorPath(err error, prefix string) error {

@@ -33,11 +33,18 @@ type Field struct {
 
 // TypeInfo is cached metadata for a struct type.
 type TypeInfo struct {
-	Type              reflect.Type
-	Fields            []Field
-	MarshalFields     []Field
+	Type          reflect.Type
+	Fields        []Field
+	MarshalFields []Field
+	// LowerNames holds strings.ToLower(Fields[i].Name), parallel to Fields, so
+	// the small-struct lookup fast path can match case-insensitive aliases
+	// without hashing the map or allocating a lowercased key per decoded field.
+	LowerNames        []string
 	HasDuplicateNames bool
 	ByName            map[string]Field
+	// ByNameIndex maps the same keys as ByName to the index of the field within
+	// Fields, letting hot-path lookups return a *Field without copying a Field.
+	ByNameIndex map[string]int32
 }
 
 // InvalidTagOptionError reports unsupported TOML tag options.
@@ -72,7 +79,11 @@ func Lookup(t reflect.Type) (*TypeInfo, error) {
 }
 
 func build(t reflect.Type) (*TypeInfo, error) {
-	info := &TypeInfo{Type: t, ByName: make(map[string]Field)}
+	info := &TypeInfo{
+		Type:        t,
+		ByName:      make(map[string]Field),
+		ByNameIndex: make(map[string]int32),
+	}
 	seenNames := make(map[string]struct{})
 	for sf := range t.Fields() {
 		if sf.PkgPath != "" && !sf.Anonymous {
@@ -88,9 +99,11 @@ func build(t reflect.Type) (*TypeInfo, error) {
 		if name == "" {
 			name = sf.Name
 		}
+		idx := int32(len(info.Fields))
 		field := Field{Name: name, Index: append([]int(nil), sf.Index...), OmitZero: omit, Type: sf.Type}
 		if _, exists := info.ByName[name]; !exists {
 			info.ByName[name] = field
+			info.ByNameIndex[name] = idx
 		}
 		if _, exists := seenNames[name]; exists {
 			info.HasDuplicateNames = true
@@ -101,14 +114,17 @@ func build(t reflect.Type) (*TypeInfo, error) {
 		if lower != name {
 			if _, exists := info.ByName[lower]; !exists {
 				info.ByName[lower] = field
+				info.ByNameIndex[lower] = idx
 			}
 		}
 		info.Fields = append(info.Fields, field)
+		info.LowerNames = append(info.LowerNames, lower)
 	}
-	for _, field := range info.Fields {
+	for i, field := range info.Fields {
 		lower := strings.ToLower(field.Name)
 		if _, exists := info.ByName[lower]; !exists {
 			info.ByName[lower] = field
+			info.ByNameIndex[lower] = int32(i)
 		}
 	}
 	info.MarshalFields = slices.Clone(info.Fields)

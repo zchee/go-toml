@@ -460,16 +460,42 @@ func directAssignmentForKeyInfo(root reflect.Value, info *reflectcache.TypeInfo,
 	}
 }
 
-func lookupStructFieldBytes(info *reflectcache.TypeInfo, name []byte) (reflectcache.Field, bool) {
-	if field, ok := info.ByName[unsafeString(name)]; ok {
-		return field, true
+// smallStructFieldLimit is the field count at or below which struct field
+// lookups scan Fields linearly instead of hashing the ByNameIndex map. The
+// linear byte-compare avoids the map hash for the common small-struct case.
+const smallStructFieldLimit = 8
+
+// lookupStructFieldBytes resolves name to a field of the struct described by
+// info, returning a pointer into info.Fields to avoid copying a ~48-byte Field
+// per decoded key. It never allocates. The lookup is byte-identical to a
+// case-sensitive match against ByName (which also holds lowercased aliases)
+// followed by the ASCII case-insensitive fallback: exact and alias matches win
+// over the case-folded scan, mirroring info.ByName exactly.
+func lookupStructFieldBytes(info *reflectcache.TypeInfo, name []byte) (*reflectcache.Field, bool) {
+	fields := info.Fields
+	key := unsafeString(name)
+	if len(fields) <= smallStructFieldLimit {
+		for i := range fields {
+			if fields[i].Name == key || info.LowerNames[i] == key {
+				return &fields[i], true
+			}
+		}
+		for i := range fields {
+			if asciiEqualFoldStringBytes(fields[i].Name, name) {
+				return &fields[i], true
+			}
+		}
+		return nil, false
 	}
-	for _, field := range info.Fields {
-		if asciiEqualFoldStringBytes(field.Name, name) {
-			return field, true
+	if idx, ok := info.ByNameIndex[key]; ok {
+		return &fields[idx], true
+	}
+	for i := range fields {
+		if asciiEqualFoldStringBytes(fields[i].Name, name) {
+			return &fields[i], true
 		}
 	}
-	return reflectcache.Field{}, false
+	return nil, false
 }
 
 func asciiEqualFoldStringBytes(s string, b []byte) bool {

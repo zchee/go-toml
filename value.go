@@ -1227,6 +1227,13 @@ func parseUintLiteralDigits(raw []byte, base byte, limit uint64) (uint64, error)
 	if len(raw) == 0 {
 		return 0, strconv.ErrSyntax
 	}
+	// Hoist the overflow cutoff out of the loop. u*base+d > limit holds iff
+	// u > limit/base, or u == limit/base and d > limit%base. Computing
+	// cutoff/cutlim once replaces the per-digit division (which the runtime
+	// base blocked from strength-reducing) with two comparisons per digit.
+	base64 := uint64(base)
+	cutoff := limit / base64
+	cutlim := limit % base64
 	var u uint64
 	sawDigit := false
 	for _, c := range raw {
@@ -1239,10 +1246,10 @@ func parseUintLiteralDigits(raw []byte, base byte, limit uint64) (uint64, error)
 		}
 		sawDigit = true
 		d := uint64(digit)
-		if u > (limit-d)/uint64(base) {
+		if u > cutoff || (u == cutoff && d > cutlim) {
 			return 0, strconv.ErrRange
 		}
-		u = u*uint64(base) + d
+		u = u*base64 + d
 	}
 	if !sawDigit {
 		return 0, strconv.ErrSyntax
