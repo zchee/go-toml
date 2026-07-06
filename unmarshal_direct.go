@@ -890,10 +890,12 @@ func (d *Decoder) arenaString(raw []byte) (string, bool) {
 	if off > uintptr(len(d.buf)-len(raw)) {
 		return "", false
 	}
-	if d.stringArena == "" {
-		d.stringArena = string(d.buf)
-	}
-	return d.stringArena[int(off) : int(off)+len(raw)], true
+	// raw is proven to lie within d.buf, so the decoded string can alias the
+	// input buffer directly with zero copy. This is the default aliasing
+	// contract: decoded strings remain valid only while the input buffer is
+	// unmodified; WithCopiedStrings opts into independent copies (handled in
+	// directStringValue before this function is reached).
+	return unsafe.String(&d.buf[off], len(raw)), true
 }
 
 //nolint:cyclop,funlen,gocognit // typed fast-path bind dispatch over direct value kinds; cohesive.

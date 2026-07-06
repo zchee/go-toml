@@ -483,7 +483,7 @@ func TestFacadeUnmarshalDirectArrayTableClearsStaleCapacity(t *testing.T) {
 	}
 }
 
-func TestDirectStringValueUsesArenaForEscapeFreeStrings(t *testing.T) {
+func TestDirectStringValueAliasesInputForEscapeFreeStrings(t *testing.T) {
 	t.Parallel()
 
 	type sample struct {
@@ -511,23 +511,30 @@ func TestDirectStringValueUsesArenaForEscapeFreeStrings(t *testing.T) {
 		t.Fatalf("Escaped = %q, want %q", got, want)
 	}
 
-	arenaBase := stringArenaBaseForMarker(t, input, dst.Basic, "alpha")
-	if got := stringArenaBaseForMarker(t, input, dst.Literal, "beta"); got != arenaBase {
-		t.Fatalf("Literal arena base = %#x, want shared base %#x", got, arenaBase)
+	// Default aliasing contract: escape-free string values alias the caller's
+	// input buffer directly (zero copy), so their data pointers fall inside the
+	// input's byte range. Escaped strings are materialized into fresh
+	// allocations and therefore do not alias the input.
+	inputBase := bytesDataPointer(input)
+	if p := stringDataPointer(dst.Basic); !pointerInRange(p, inputBase, len(input)) {
+		t.Fatalf("Basic string pointer %#x not inside input buffer [%#x,%#x); want aliasing", p, inputBase, inputBase+uintptr(len(input)))
 	}
-	if got := stringArenaBaseForMarker(t, input, dst.Multi, "line\n"); got != arenaBase {
-		t.Fatalf("Multi arena base = %#x, want shared base %#x", got, arenaBase)
+	if p := stringDataPointer(dst.Literal); !pointerInRange(p, inputBase, len(input)) {
+		t.Fatalf("Literal string pointer %#x not inside input buffer [%#x,%#x); want aliasing", p, inputBase, inputBase+uintptr(len(input)))
 	}
-	if arenaBase == bytesDataPointer(input) {
-		t.Fatalf("arena base aliases caller input at %#x; want immutable arena copy", arenaBase)
+	if p := stringDataPointer(dst.Multi); !pointerInRange(p, inputBase, len(input)) {
+		t.Fatalf("Multi string pointer %#x not inside input buffer [%#x,%#x); want aliasing", p, inputBase, inputBase+uintptr(len(input)))
 	}
-	if escaped := stringDataPointer(dst.Escaped); pointerInRange(escaped, arenaBase, len(input)) {
-		t.Fatalf("escaped string pointer %#x is inside escape-free arena [%#x,%#x)", escaped, arenaBase, arenaBase+uintptr(len(input)))
+	if escaped := stringDataPointer(dst.Escaped); pointerInRange(escaped, inputBase, len(input)) {
+		t.Fatalf("escaped string pointer %#x is inside input buffer [%#x,%#x); want independent allocation", escaped, inputBase, inputBase+uintptr(len(input)))
 	}
 
+	// Because Basic aliases the input, mutating the input mutates the decoded
+	// string. Callers that need independence must use WithCopiedStrings (see
+	// TestDirectStringValueCopiedStringsBypassesArena).
 	copy(input[bytes.Index(input, []byte("alpha")):], "omega")
-	if got, want := dst.Basic, "alpha"; got != want {
-		t.Fatalf("Basic after input mutation = %q, want immutable %q", got, want)
+	if got, want := dst.Basic, "omega"; got != want {
+		t.Fatalf("Basic after input mutation = %q, want aliased %q", got, want)
 	}
 }
 
@@ -544,27 +551,17 @@ func TestDirectStringValueCopiedStringsBypassesArena(t *testing.T) {
 	if got != "alpha" {
 		t.Fatalf("directStringValue(copyStrings) = %q, want alpha", got)
 	}
-	if dec.stringArena != "" {
-		t.Fatalf("decoder string arena = %q, want copy path to bypass arena", dec.stringArena)
+	// The copy path must return an independent allocation, not a view aliasing
+	// the input buffer: its data pointer must lie outside input's byte range.
+	inputBase := bytesDataPointer(input)
+	if p := stringDataPointer(got); pointerInRange(p, inputBase, len(input)) {
+		t.Fatalf("copyStrings result pointer %#x is inside input buffer [%#x,%#x); want independent copy", p, inputBase, inputBase+uintptr(len(input)))
 	}
 
 	cfg := bindConfigFromOptions([]Option{WithCopiedStrings()})
 	if !cfg.copyStrings {
 		t.Fatal("bindConfigFromOptions(WithCopiedStrings()) copyStrings = false, want true")
 	}
-}
-
-func stringArenaBaseForMarker(t *testing.T, input []byte, value, marker string) uintptr {
-	t.Helper()
-
-	off := bytes.Index(input, []byte(marker))
-	if off < 0 {
-		t.Fatalf("marker %q not found in input", marker)
-	}
-	if value == "" {
-		t.Fatalf("value for marker %q is empty", marker)
-	}
-	return stringDataPointer(value) - uintptr(off)
 }
 
 func stringDataPointer(s string) uintptr {

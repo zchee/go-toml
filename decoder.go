@@ -72,7 +72,12 @@ func WithLocalAsUTC() Option {
 }
 
 // WithCopiedStrings forces decoded string values to use independent string
-// allocations instead of sharing Unmarshal's per-document string arena.
+// allocations instead of aliasing the input buffer.
+//
+// By default the direct decode path aliases the input buffer for escape-free
+// string values (zero copy), so those strings are valid only while the input
+// is unmodified. WithCopiedStrings opts out of that aliasing: every decoded
+// string is copied, so it stays valid regardless of later input mutation.
 func WithCopiedStrings() Option {
 	return func(d *Decoder) {
 		d.copyStrings = true
@@ -122,7 +127,6 @@ type Decoder struct {
 	containerStack []byte
 	localAsUTC     bool
 	copyStrings    bool
-	stringArena    string
 	tokenLine      int
 	tokenCol       int
 	tokenScalar    tokenScalar
@@ -827,6 +831,14 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 	}
 	quote := d.buf[off]
 	if quote == '"' {
+		// escapeFree tracks whether the body contains no backslash escape. The
+		// ScanBasicStringStrict kernel only advances over bytes that are valid
+		// unescaped basic-string content (it stops at control bytes, which the
+		// default branch reports), so if the closing quote is reached without
+		// ever taking the '\\' branch, the whole body is already proven valid
+		// and the validateStringValue re-scan below is redundant. Escaped
+		// strings still need validation to check escape-sequence correctness.
+		escapeFree := true
 		for i := off + 1; i < len(d.buf); {
 			n := scan.ScanBasicStringStrict(d.buf[i:])
 			i += n
@@ -840,11 +852,14 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 				if i+1 >= len(d.buf) {
 					return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
 				}
+				escapeFree = false
 				i += 2
 			case '"':
 				end := i + 1
-				if err := validateStringValue(d.buf[off:end]); err != nil {
-					return 0, TokenKindInvalid, err
+				if !escapeFree {
+					if err := validateStringValue(d.buf[off:end]); err != nil {
+						return 0, TokenKindInvalid, err
+					}
 				}
 				return end, TokenKindValueString, nil
 			default:

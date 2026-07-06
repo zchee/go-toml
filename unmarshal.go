@@ -31,6 +31,13 @@ var textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
 var decodeFilterCache sync.Map // map[reflect.Type]*decodeFilter
 
 // Unmarshal decodes a TOML document into dst.
+//
+// By default, decoded string values alias data directly (zero copy). Callers
+// MUST NOT mutate data while any decoded string remains in use, and MUST NOT
+// retain decoded strings past a subsequent mutation of data. Escaped strings,
+// which require unescaping, are always independently allocated. To force every
+// decoded string into an independent allocation, decode with a Decoder
+// configured via WithCopiedStrings instead.
 func Unmarshal(data []byte, dst any) error {
 	return unmarshalWithOptions(data, dst, UnmarshalOptions{})
 }

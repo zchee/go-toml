@@ -16,7 +16,6 @@ package toml
 
 import (
 	"encoding"
-	"fmt"
 	"strconv"
 	"time"
 )
@@ -232,9 +231,35 @@ func appendTime(buf []byte, hour, minute, second, nanos int, nanoDigits int8, ha
 	return buf
 }
 
+// twoDigits holds the zero-padded decimal text for every value 0-99 back to
+// back, so a value's rendering is the 2-byte slice at offset 2*n.
+const twoDigits = "00010203040506070809" +
+	"10111213141516171819" +
+	"20212223242526272829" +
+	"30313233343536373839" +
+	"40414243444546474849" +
+	"50515253545556575859" +
+	"60616263646566676869" +
+	"70717273747576777879" +
+	"80818283848586878889" +
+	"90919293949596979899"
+
+// appendPaddedInt appends n to buf as a zero-padded decimal occupying at
+// least width digits (2 or 4, the only widths TOML date-time fields use).
+// n is expected to be non-negative and within width's natural range (0-99
+// for width 2, 0-9999 for width 4); values outside that range still append
+// correctly but without the fmt package's sign-aware zero-padding.
 func appendPaddedInt(buf []byte, n, width int) []byte {
 	if width == 4 {
-		return fmt.Appendf(buf, "%04d", n)
+		if n < 0 || n > 9999 {
+			return strconv.AppendInt(buf, int64(n), 10)
+		}
+		hi, lo := n/100, n%100
+		buf = append(buf, twoDigits[2*hi:2*hi+2]...)
+		return append(buf, twoDigits[2*lo:2*lo+2]...)
 	}
-	return fmt.Appendf(buf, "%02d", n)
+	if n < 0 || n > 99 {
+		return strconv.AppendInt(buf, int64(n), 10)
+	}
+	return append(buf, twoDigits[2*n:2*n+2]...)
 }

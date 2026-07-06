@@ -16,13 +16,13 @@ package toml
 
 import (
 	"bytes"
+	"cmp"
 	"encoding"
 	"math"
 	"reflect"
 	"slices"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -176,27 +176,24 @@ func encodeEntriesDocument(buf *bytes.Buffer, entries []marshalEntry, path []str
 }
 
 func encodeMapDocument(buf *bytes.Buffer, v reflect.Value, path []string) error {
-	keys, err := sortedMapKeys(v)
+	entries, err := sortedMapEntries(v)
 	if err != nil {
 		return err
 	}
-	for _, key := range keys {
-		value := v.MapIndex(key)
-		if isTableLike(value) {
+	var tables []marshalEntry
+	for _, entry := range entries {
+		if isTableLike(entry.value) {
+			tables = append(tables, entry)
 			continue
 		}
-		if err := writeKeyValue(buf, key.String(), value); err != nil {
+		if err := writeKeyValue(buf, entry.name, entry.value); err != nil {
 			return err
 		}
 	}
-	for _, key := range keys {
-		value := v.MapIndex(key)
-		if !isTableLike(value) {
-			continue
-		}
-		if isArrayOfTables(value) {
-			items := indirectValue(value)
-			nextPath := appendPath(path, key.String())
+	for _, entry := range tables {
+		if isArrayOfTables(entry.value) {
+			items := indirectValue(entry.value)
+			nextPath := appendPath(path, entry.name)
 			for i := range items.Len() {
 				buf.WriteByte('\n')
 				writeHeader(buf, nextPath, true)
@@ -207,9 +204,9 @@ func encodeMapDocument(buf *bytes.Buffer, v reflect.Value, path []string) error 
 			continue
 		}
 		buf.WriteByte('\n')
-		nextPath := appendPath(path, key.String())
+		nextPath := appendPath(path, entry.name)
 		writeHeader(buf, nextPath, false)
-		if err := encodeDocument(buf, value, nextPath); err != nil {
+		if err := encodeDocument(buf, entry.value, nextPath); err != nil {
 			return err
 		}
 	}
@@ -317,13 +314,19 @@ func writeValue(buf *bytes.Buffer, v reflect.Value) error {
 		writeQuotedString(buf, v.String())
 		return nil
 	case reflect.Bool:
-		buf.WriteString(strconv.FormatBool(v.Bool()))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendBool(b, v.Bool())
+		buf.Write(b)
 		return nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		buf.WriteString(strconv.FormatInt(v.Int(), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendInt(b, v.Int(), 10)
+		buf.Write(b)
 		return nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		buf.WriteString(strconv.FormatUint(v.Uint(), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendUint(b, v.Uint(), 10)
+		buf.Write(b)
 		return nil
 	case reflect.Float32, reflect.Float64:
 		writeFloat(buf, v.Float(), v.Type().Bits())
@@ -361,40 +364,64 @@ func writeAnyValue(buf *bytes.Buffer, value any) error {
 		writeQuotedString(buf, x)
 		return nil
 	case bool:
-		buf.WriteString(strconv.FormatBool(x))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendBool(b, x)
+		buf.Write(b)
 		return nil
 	case int:
-		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendInt(b, int64(x), 10)
+		buf.Write(b)
 		return nil
 	case int8:
-		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendInt(b, int64(x), 10)
+		buf.Write(b)
 		return nil
 	case int16:
-		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendInt(b, int64(x), 10)
+		buf.Write(b)
 		return nil
 	case int32:
-		buf.WriteString(strconv.FormatInt(int64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendInt(b, int64(x), 10)
+		buf.Write(b)
 		return nil
 	case int64:
-		buf.WriteString(strconv.FormatInt(x, 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendInt(b, x, 10)
+		buf.Write(b)
 		return nil
 	case uint:
-		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendUint(b, uint64(x), 10)
+		buf.Write(b)
 		return nil
 	case uint8:
-		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendUint(b, uint64(x), 10)
+		buf.Write(b)
 		return nil
 	case uint16:
-		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendUint(b, uint64(x), 10)
+		buf.Write(b)
 		return nil
 	case uint32:
-		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendUint(b, uint64(x), 10)
+		buf.Write(b)
 		return nil
 	case uint64:
-		buf.WriteString(strconv.FormatUint(x, 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendUint(b, x, 10)
+		buf.Write(b)
 		return nil
 	case uintptr:
-		buf.WriteString(strconv.FormatUint(uint64(x), 10))
+		b := buf.AvailableBuffer()
+		b = strconv.AppendUint(b, uint64(x), 10)
+		buf.Write(b)
 		return nil
 	case float32:
 		writeFloat(buf, float64(x), 32)
@@ -403,16 +430,38 @@ func writeAnyValue(buf *bytes.Buffer, value any) error {
 		writeFloat(buf, x, 64)
 		return nil
 	case time.Time:
-		buf.WriteString(x.Format(time.RFC3339Nano))
+		b := buf.AvailableBuffer()
+		b = x.AppendFormat(b, time.RFC3339Nano)
+		buf.Write(b)
 		return nil
 	case LocalDateTime:
-		buf.WriteString(x.String())
+		if err := validateDate(x.Year, x.Month, x.Day); err != nil {
+			return nil
+		}
+		if err := validateLocalClock(x.Hour, x.Minute, x.Second, x.Nanosecond, x.nanoDigits); err != nil {
+			return nil
+		}
+		b := buf.AvailableBuffer()
+		b = appendDate(b, x.Year, x.Month, x.Day)
+		b = append(b, 'T')
+		b = appendTime(b, x.Hour, x.Minute, x.Second, x.Nanosecond, x.nanoDigits, x.hasSecond)
+		buf.Write(b)
 		return nil
 	case LocalDate:
-		buf.WriteString(x.String())
+		if err := validateDate(x.Year, x.Month, x.Day); err != nil {
+			return nil
+		}
+		b := buf.AvailableBuffer()
+		b = appendDate(b, x.Year, x.Month, x.Day)
+		buf.Write(b)
 		return nil
 	case LocalTime:
-		buf.WriteString(x.String())
+		if err := validateLocalClock(x.Hour, x.Minute, x.Second, x.Nanosecond, x.nanoDigits); err != nil {
+			return nil
+		}
+		b := buf.AvailableBuffer()
+		b = appendTime(b, x.Hour, x.Minute, x.Second, x.Nanosecond, x.nanoDigits, x.hasSecond)
+		buf.Write(b)
 		return nil
 	case encoding.TextMarshaler:
 		text, err := x.MarshalText()
@@ -444,30 +493,55 @@ func writeSpecialValue(buf *bytes.Buffer, v reflect.Value) (bool, error) {
 	if !v.CanInterface() {
 		return false, nil
 	}
-	t := v.Type()
-	switch t {
-	case timeType:
-		buf.WriteString(v.Interface().(time.Time).Format(time.RFC3339Nano))
+	switch lookupSpecialKind(v.Type()) {
+	case specialKindTime:
+		t := v.Interface().(time.Time)
+		b := buf.AvailableBuffer()
+		b = t.AppendFormat(b, time.RFC3339Nano)
+		buf.Write(b)
 		return true, nil
-	case localDateTimeType:
-		buf.WriteString(v.Interface().(LocalDateTime).String())
+	case specialKindLocalDateTime:
+		dt := v.Interface().(LocalDateTime)
+		if err := validateDate(dt.Year, dt.Month, dt.Day); err != nil {
+			return true, nil
+		}
+		if err := validateLocalClock(dt.Hour, dt.Minute, dt.Second, dt.Nanosecond, dt.nanoDigits); err != nil {
+			return true, nil
+		}
+		b := buf.AvailableBuffer()
+		b = appendDate(b, dt.Year, dt.Month, dt.Day)
+		b = append(b, 'T')
+		b = appendTime(b, dt.Hour, dt.Minute, dt.Second, dt.Nanosecond, dt.nanoDigits, dt.hasSecond)
+		buf.Write(b)
 		return true, nil
-	case localDateType:
-		buf.WriteString(v.Interface().(LocalDate).String())
+	case specialKindLocalDate:
+		d := v.Interface().(LocalDate)
+		if err := validateDate(d.Year, d.Month, d.Day); err != nil {
+			return true, nil
+		}
+		b := buf.AvailableBuffer()
+		b = appendDate(b, d.Year, d.Month, d.Day)
+		buf.Write(b)
 		return true, nil
-	case localTimeType:
-		buf.WriteString(v.Interface().(LocalTime).String())
+	case specialKindLocalTime:
+		lt := v.Interface().(LocalTime)
+		if err := validateLocalClock(lt.Hour, lt.Minute, lt.Second, lt.Nanosecond, lt.nanoDigits); err != nil {
+			return true, nil
+		}
+		b := buf.AvailableBuffer()
+		b = appendTime(b, lt.Hour, lt.Minute, lt.Second, lt.Nanosecond, lt.nanoDigits, lt.hasSecond)
+		buf.Write(b)
 		return true, nil
-	}
-	if t.PkgPath() == "" || !t.Implements(textMarshalerType) {
+	case specialKindTextMarshaler:
+		text, err := v.Interface().(encoding.TextMarshaler).MarshalText()
+		if err != nil {
+			return true, err
+		}
+		writeQuotedString(buf, string(text))
+		return true, nil
+	default:
 		return false, nil
 	}
-	text, err := v.Interface().(encoding.TextMarshaler).MarshalText()
-	if err != nil {
-		return true, err
-	}
-	writeQuotedString(buf, string(text))
-	return true, nil
 }
 
 func writeQuotedString(buf *bytes.Buffer, s string) {
@@ -534,11 +608,12 @@ func writeFloat(buf *bytes.Buffer, value float64, bitSize int) {
 			buf.WriteString("nan")
 		}
 	default:
-		text := strconv.FormatFloat(value, 'g', -1, bitSize)
-		if !strings.ContainsAny(text, ".eE") {
-			text += ".0"
+		b := buf.AvailableBuffer()
+		b = strconv.AppendFloat(b, value, 'g', -1, bitSize)
+		if !bytes.ContainsAny(b, ".eE") {
+			b = append(b, '.', '0')
 		}
-		buf.WriteString(text)
+		buf.Write(b)
 	}
 }
 
@@ -550,17 +625,17 @@ func writeInlineTable(buf *bytes.Buffer, v reflect.Value) error {
 	buf.WriteString("{ ")
 	switch v.Kind() {
 	case reflect.Map:
-		keys, err := sortedMapKeys(v)
+		entries, err := sortedMapEntries(v)
 		if err != nil {
 			return err
 		}
-		for i, key := range keys {
+		for i, entry := range entries {
 			if i > 0 {
 				buf.WriteString(", ")
 			}
-			buf.WriteString(formatKey(key.String()))
+			buf.WriteString(formatKey(entry.name))
 			buf.WriteString(" = ")
-			if err := writeValue(buf, v.MapIndex(key)); err != nil {
+			if err := writeValue(buf, entry.value); err != nil {
 				return err
 			}
 		}
@@ -828,15 +903,21 @@ func findMarshalEntry(entries []marshalEntry, name string) int {
 	return -1
 }
 
-func sortedMapKeys(v reflect.Value) ([]reflect.Value, error) {
+// sortedMapEntries extracts every key/value pair of the string-keyed map v
+// in one MapRange pass and returns them sorted by key name, so callers never
+// need a second, separately-hashed MapIndex lookup per key.
+func sortedMapEntries(v reflect.Value) ([]marshalEntry, error) {
 	if v.Type().Key().Kind() != reflect.String {
 		return nil, &UnsupportedTypeError{Type: v.Type().String()}
 	}
-	keys := v.MapKeys()
-	sort.Slice(keys, func(i, j int) bool {
-		return keys[i].String() < keys[j].String()
+	entries := make([]marshalEntry, 0, v.Len())
+	for iter := v.MapRange(); iter.Next(); {
+		entries = append(entries, marshalEntry{name: iter.Key().String(), value: iter.Value()})
+	}
+	slices.SortFunc(entries, func(a, b marshalEntry) int {
+		return cmp.Compare(a.name, b.name)
 	})
-	return keys, nil
+	return entries, nil
 }
 
 func sortedStringKeys(m map[string]any) []string {
@@ -903,13 +984,53 @@ func isScalarSpecial(v reflect.Value) bool {
 	return v.IsValid() && v.CanInterface() && isScalarSpecialType(v.Type())
 }
 
-func isScalarSpecialType(t reflect.Type) bool {
-	switch t {
-	case timeType, localDateTimeType, localDateType, localTimeType:
-		return true
-	default:
-		return t.PkgPath() != "" && t.Implements(textMarshalerType)
+// specialKind classifies a reflect.Type for TOML scalar encoding purposes.
+type specialKind uint8
+
+const (
+	specialKindNone specialKind = iota
+	specialKindTime
+	specialKindLocalDateTime
+	specialKindLocalDate
+	specialKindLocalTime
+	specialKindTextMarshaler
+)
+
+// specialKindCache memoizes computeSpecialKind per reflect.Type, so the
+// encoding.TextMarshaler method-set scan runs once per type instead of once
+// per encoded value.
+var specialKindCache sync.Map // map[reflect.Type]specialKind
+
+func lookupSpecialKind(t reflect.Type) specialKind {
+	if kind, ok := specialKindCache.Load(t); ok {
+		return kind.(specialKind)
 	}
+	kind := computeSpecialKind(t)
+	if actual, loaded := specialKindCache.LoadOrStore(t, kind); loaded {
+		return actual.(specialKind)
+	}
+	return kind
+}
+
+func computeSpecialKind(t reflect.Type) specialKind {
+	switch t {
+	case timeType:
+		return specialKindTime
+	case localDateTimeType:
+		return specialKindLocalDateTime
+	case localDateType:
+		return specialKindLocalDate
+	case localTimeType:
+		return specialKindLocalTime
+	}
+	if t.PkgPath() != "" && t.Implements(textMarshalerType) {
+		return specialKindTextMarshaler
+	}
+	return specialKindNone
+}
+
+func isScalarSpecialType(t reflect.Type) bool {
+	return lookupSpecialKind(t) != specialKindNone
 }
 
 func isArrayOfTables(v reflect.Value) bool {

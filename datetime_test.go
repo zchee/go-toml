@@ -17,6 +17,7 @@ package toml
 import (
 	"encoding"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -291,6 +292,30 @@ func TestDecoderDatetimeClassification(t *testing.T) {
 				t.Fatalf("ReadToken EOF = %v", err)
 			}
 		})
+	}
+}
+
+func TestAppendPaddedInt(t *testing.T) {
+	t.Parallel()
+
+	boundaries := []int{0, 1, 9, 10, 99, 100, 999, 2024, 9999}
+
+	for _, width := range []int{2, 4} {
+		verb := "%02d"
+		if width == 4 {
+			verb = "%04d"
+		}
+		for _, n := range boundaries {
+			name := fmt.Sprintf("success: width=%d n=%d", width, n)
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				want := fmt.Sprintf(verb, n)
+				got := string(appendPaddedInt(nil, n, width))
+				if got != want {
+					t.Fatalf("appendPaddedInt(nil, %d, %d) = %q, want %q", n, width, got, want)
+				}
+			})
+		}
 	}
 }
 
