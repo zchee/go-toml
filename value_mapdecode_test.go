@@ -141,6 +141,51 @@ func TestParseDocumentMapDecodeValidStructuresPreserved(t *testing.T) {
 	}
 }
 
+// TestParseDocumentMapDecodeLargeCorpusParity anchors the leaned path against a
+// large real-world array-table document (cargo.lock: 424 [[package]] entries,
+// bare scalar keys, a top-level integer, and the array-table capacity/epoch
+// bookkeeping). The golden values would break if the fast-path key binding or
+// array-table appends altered decode output, so it locks byte-level parity at
+// scale beyond the curated equivalence case.
+func TestParseDocumentMapDecodeLargeCorpusParity(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("testdata/corpus/cargo.lock")
+	if err != nil {
+		t.Skipf("corpus unavailable: %v", err)
+	}
+
+	var got map[string]any
+	if err := Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal(cargo.lock) error = %v", err)
+	}
+
+	if v, ok := got["version"].(int64); !ok || v != 3 {
+		t.Fatalf("version = %#v, want int64(3)", got["version"])
+	}
+	pkgs, ok := got["package"].([]any)
+	if !ok {
+		t.Fatalf("package = %T, want []any", got["package"])
+	}
+	if len(pkgs) != 424 {
+		t.Fatalf("len(package) = %d, want 424", len(pkgs))
+	}
+	edges := map[int]struct{ name, version string }{
+		0:   {"adler2", "2.0.0"},
+		423: {"zeroize", "1.7.0"},
+	}
+	for idx, want := range edges {
+		pkg, ok := pkgs[idx].(map[string]any)
+		if !ok {
+			t.Fatalf("package[%d] = %T, want map[string]any", idx, pkgs[idx])
+		}
+		if pkg["name"] != want.name || pkg["version"] != want.version {
+			t.Fatalf("package[%d] = {name:%v version:%v}, want {name:%q version:%q}",
+				idx, pkg["name"], pkg["version"], want.name, want.version)
+		}
+	}
+}
+
 // TestParseDocumentMapDecodeAllocations locks the allocation win from leaning
 // parseDocument's per-key/per-header temporaries. The unoptimized path decoded
 // benchmark.toml into map[string]any at 670 allocs/op; the ceiling keeps a wide
