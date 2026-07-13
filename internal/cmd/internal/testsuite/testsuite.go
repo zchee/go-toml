@@ -17,9 +17,11 @@
 package testsuite
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 
 	"github.com/zchee/go-toml"
 )
@@ -45,7 +47,7 @@ func ValueToTaggedJSON(doc any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return json.MarshalIndent(tagged, "", "  ")
+	return json.Marshal(tagged, jsontext.WithIndent("  "))
 }
 
 // DecodeStdin is a helper function for the toml-test binary interface.  TOML input
@@ -58,13 +60,12 @@ func DecodeStdin() error {
 		return fmt.Errorf("error decoding TOML: %w", err)
 	}
 
-	j := json.NewEncoder(os.Stdout)
-	j.SetIndent("", "  ")
+	j := jsontext.NewEncoder(os.Stdout, jsontext.WithIndent("  "))
 	tagged, err := addTag(decoded)
 	if err != nil {
 		return fmt.Errorf("tagging decoded TOML: %w", err)
 	}
-	if err := j.Encode(tagged); err != nil {
+	if err := json.MarshalEncode(j, tagged); err != nil {
 		return fmt.Errorf("error encoding JSON: %w", err)
 	}
 
@@ -76,7 +77,8 @@ func DecodeStdin() error {
 // STDOUT.
 func EncodeStdin() error {
 	var j any
-	err := json.NewDecoder(os.Stdin).Decode(&j)
+	dec := jsontext.NewDecoder(os.Stdin)
+	err := json.UnmarshalDecode(dec, &j)
 	if err != nil {
 		return err
 	}

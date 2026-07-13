@@ -15,9 +15,11 @@
 package testsuite
 
 import (
-	"encoding/json"
 	"math"
 	"testing"
+
+	"github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 )
 
 type testMap map[string]any
@@ -42,7 +44,7 @@ func TestValueToTaggedJSONNestedPublicContainers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addTag() error = %v", err)
 	}
-	got, err := json.MarshalIndent(tagged, "", "  ")
+	got, err := json.Marshal(tagged, jsontext.WithIndent("  "))
 	if err != nil {
 		t.Fatalf("json.MarshalIndent(addTag()) error = %v", err)
 	}

@@ -17,7 +17,6 @@ package toml
 import (
 	"bufio"
 	"cmp"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-json-experiment/json"
 	gocmp "github.com/google/go-cmp/cmp"
 )
 

@@ -15,9 +15,10 @@
 package testsuite
 
 import (
-	"encoding/json"
 	"math"
 	"testing"
+
+	"github.com/go-json-experiment/json"
 )
 
 func TestValueToTaggedJSONSpecialFloats(t *testing.T) {
