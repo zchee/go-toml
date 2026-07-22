@@ -51,6 +51,9 @@ const (
 	directValueUint
 	directValueFloat
 	directValueTime
+	directValueBytes
+	directValueDuration
+	directValueArray
 )
 
 // directRawPath keeps common dotted bare-key paths on the stack. It is used
@@ -305,6 +308,9 @@ func directValueKindOfType(t reflect.Type) directValueKind {
 	if t == reflect.TypeFor[time.Time]() {
 		return directValueTime
 	}
+	if t == reflect.TypeFor[time.Duration]() {
+		return directValueDuration
+	}
 	switch t.Kind() {
 	case reflect.String:
 		return directValueString
@@ -316,6 +322,26 @@ func directValueKindOfType(t reflect.Type) directValueKind {
 		return directValueUint
 	case reflect.Float32, reflect.Float64:
 		return directValueFloat
+	case reflect.Slice:
+		if t == reflect.TypeFor[[]byte]() {
+			return directValueBytes
+		}
+		if directArrayElementKind(t.Elem()) != directValueGeneric {
+			return directValueArray
+		}
+	case reflect.Array:
+		if directArrayElementKind(t.Elem()) != directValueGeneric {
+			return directValueArray
+		}
+	}
+	return directValueGeneric
+}
+
+func directArrayElementKind(t reflect.Type) directValueKind {
+	kind := directValueKindOfType(t)
+	switch kind {
+	case directValueString, directValueBool, directValueInt, directValueUint, directValueFloat, directValueTime, directValueDuration, directValueArray:
+		return kind
 	default:
 		return directValueGeneric
 	}
@@ -924,6 +950,88 @@ func (d *Decoder) arenaString(raw []byte) (string, bool) {
 	return unsafe.String(&d.buf[off], len(raw)), true
 }
 
+func directBytesValue(dec *Decoder, raw []byte, cfg bindConfig) ([]byte, error) {
+	if dec == nil || cfg.copyStrings {
+		s, err := parseStringValue(raw)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(s), nil
+	}
+	body, kind, err := stringValueBody(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case stringValueLiteral:
+		return directLiteralBytesValue(dec, raw, body, false)
+	case stringValueMultilineLiteral:
+		return directLiteralBytesValue(dec, raw, body, true)
+	case stringValueBasic:
+		return directBasicBytesValue(dec, raw, body, false)
+	case stringValueMultilineBasic:
+		return directBasicBytesValue(dec, raw, body, true)
+	default:
+		return nil, malformedStringError(raw)
+	}
+}
+
+func directLiteralBytesValue(dec *Decoder, raw, body []byte, multiline bool) ([]byte, error) {
+	if err := validateLiteralStringBody(body, multiline); err != nil {
+		return nil, err
+	}
+	if b, ok := dec.arenaBytes(body); ok {
+		return b, nil
+	}
+	s, err := parseStringValue(raw)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(s), nil
+}
+
+func directBasicBytesValue(dec *Decoder, raw, body []byte, multiline bool) ([]byte, error) {
+	if bytes.IndexByte(body, '\\') >= 0 {
+		s, err := parseStringValue(raw)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(s), nil
+	}
+	if err := validateBasicStringBody(body, multiline); err != nil {
+		return nil, err
+	}
+	if b, ok := dec.arenaBytes(body); ok {
+		return b, nil
+	}
+	s, err := parseStringValue(raw)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(s), nil
+}
+
+func (d *Decoder) arenaBytes(raw []byte) ([]byte, bool) {
+	if d == nil || len(d.buf) == 0 || len(raw) > len(d.buf) {
+		return nil, false
+	}
+	if len(raw) == 0 {
+		return d.buf[:0:0], true
+	}
+	base := uintptr(unsafe.Pointer(unsafe.SliceData(d.buf)))
+	ptr := uintptr(unsafe.Pointer(unsafe.SliceData(raw)))
+	if ptr < base {
+		return nil, false
+	}
+	off := ptr - base
+	if off > uintptr(len(d.buf)-len(raw)) {
+		return nil, false
+	}
+	start := int(off)
+	end := start + len(raw)
+	return d.buf[start:end:end], true
+}
+
 //nolint:cyclop,funlen,gocognit // typed fast-path bind dispatch over direct value kinds; cohesive.
 func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKind directValueKind, cfg bindConfig) error {
 	if !dst.CanSet() {
@@ -1004,12 +1112,111 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 		if tok.Kind == TokenKindValueDatetime {
 			return directBindTimeToken(tok, dst, cfg)
 		}
+	case directValueBytes:
+		if tok.Kind == TokenKindValueString {
+			b, err := directBytesValue(dec, tok.Bytes, cfg)
+			if err != nil {
+				return err
+			}
+			dst.SetBytes(b)
+			return nil
+		}
+	case directValueDuration:
+		switch tok.Kind {
+		case TokenKindValueInteger:
+			i, err := rawTokenIntegerValue(dec, tok)
+			if err != nil {
+				return err
+			}
+			dst.SetInt(i)
+			return nil
+		case TokenKindValueString:
+			s, err := directStringValue(dec, tok.Bytes, cfg)
+			if err != nil {
+				return err
+			}
+			d, err := time.ParseDuration(s)
+			if err != nil {
+				return err
+			}
+			dst.SetInt(int64(d))
+			return nil
+		}
+	case directValueArray:
+		if tok.Kind == TokenKindArrayStart {
+			return directBindArrayToken(dec, dst, cfg)
+		}
 	}
 	value, err := parseValueToken(dec, tok.publicToken())
 	if err != nil {
 		return err
 	}
 	return bindValue(dst, value, cfg)
+}
+
+func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error {
+	elemKind := directArrayElementKind(dst.Type().Elem())
+	if elemKind == directValueGeneric {
+		value, err := parseArrayValue(dec)
+		if err != nil {
+			return err
+		}
+		return bindValue(dst, value, cfg)
+	}
+
+	switch dst.Kind() {
+	case reflect.Slice:
+		out := reflect.MakeSlice(dst.Type(), 0, 0)
+		for i := 0; ; i++ {
+			tok, err := directNextArrayValueToken(dec)
+			if err != nil {
+				return err
+			}
+			if tok.Kind == TokenKindArrayEnd {
+				dst.Set(out)
+				return nil
+			}
+			elem := reflect.New(dst.Type().Elem()).Elem()
+			if err := directBindTypedToken(dec, tok, elem, elemKind, cfg); err != nil {
+				return bindErrorPath(err, indexPath(i))
+			}
+			out = reflect.Append(out, elem)
+		}
+	case reflect.Array:
+		for i := 0; ; i++ {
+			tok, err := directNextArrayValueToken(dec)
+			if err != nil {
+				return err
+			}
+			if tok.Kind == TokenKindArrayEnd {
+				if i != dst.Len() {
+					return mismatch(dst.Type(), []any{})
+				}
+				return nil
+			}
+			if i >= dst.Len() {
+				return mismatch(dst.Type(), []any{})
+			}
+			if err := directBindTypedToken(dec, tok, dst.Index(i), elemKind, cfg); err != nil {
+				return bindErrorPath(err, indexPath(i))
+			}
+		}
+	default:
+		return mismatch(dst.Type(), []any{})
+	}
+}
+
+func directNextArrayValueToken(dec *Decoder) (rawToken, error) {
+	for {
+		tok, err := dec.readToken()
+		if err != nil {
+			return rawToken{}, err
+		}
+		if tok.Kind == TokenKindComment {
+			continue
+		}
+		return tok, nil
+	}
 }
 
 func directBindTimeToken(tok rawToken, dst reflect.Value, cfg bindConfig) error {

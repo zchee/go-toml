@@ -16,14 +16,17 @@ package toml
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	rand "math/rand/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -128,6 +131,156 @@ func assertTokenStreamInvariants(t *testing.T, label string, data []byte, tokens
 		}
 		prevOffset = tok.Offset
 	}
+}
+
+func TestDirectDecodeParity(t *testing.T) {
+	t.Run("duration from integer", func(t *testing.T) {
+		type config struct {
+			Value time.Duration `toml:"value"`
+		}
+		got := runDirectGenericDecodeParity[config](t, "value = 5400000000000\n")
+		if got.Value != 90*time.Minute {
+			t.Fatalf("Value = %v, want %v", got.Value, 90*time.Minute)
+		}
+	})
+
+	t.Run("int array", func(t *testing.T) {
+		type config struct {
+			Value [3]int `toml:"value"`
+		}
+		got := runDirectGenericDecodeParity[config](t, "value = [1, 2, 3]\n")
+		if got.Value != [3]int{1, 2, 3} {
+			t.Fatalf("Value = %#v, want %#v", got.Value, [3]int{1, 2, 3})
+		}
+	})
+
+	t.Run("float slice", func(t *testing.T) {
+		type config struct {
+			Value []float64 `toml:"value"`
+		}
+		got := runDirectGenericDecodeParity[config](t, "value = [1, 2.5, 3]\n")
+		want := []float64{1, 2.5, 3}
+		if !reflect.DeepEqual(got.Value, want) {
+			t.Fatalf("Value = %#v, want %#v", got.Value, want)
+		}
+	})
+
+	t.Run("string array", func(t *testing.T) {
+		type config struct {
+			Value [2]string `toml:"value"`
+		}
+		got := runDirectGenericDecodeParity[config](t, `value = ["alpha", 'beta']`+"\n")
+		if got.Value != [2]string{"alpha", "beta"} {
+			t.Fatalf("Value = %#v, want %#v", got.Value, [2]string{"alpha", "beta"})
+		}
+	})
+
+	t.Run("bytes from basic string", func(t *testing.T) {
+		got := runDirectDecodeBytes(t, `value = "abc"`+"\n")
+		if !bytes.Equal(got, []byte("abc")) {
+			t.Fatalf("Value = %q, want %q", got, []byte("abc"))
+		}
+	})
+
+	t.Run("bytes from escaped basic string", func(t *testing.T) {
+		got := runDirectDecodeBytes(t, `value = "a\nb"`+"\n")
+		if !bytes.Equal(got, []byte("a\nb")) {
+			t.Fatalf("Value = %q, want %q", got, []byte("a\nb"))
+		}
+	})
+
+	t.Run("bytes from literal string", func(t *testing.T) {
+		got := runDirectDecodeBytes(t, `value = 'a\nb'`+"\n")
+		if !bytes.Equal(got, []byte(`a\nb`)) {
+			t.Fatalf("Value = %q, want %q", got, []byte(`a\nb`))
+		}
+	})
+
+	t.Run("duration from string", func(t *testing.T) {
+		type config struct {
+			Value time.Duration `toml:"value"`
+		}
+		var got config
+		if err := Unmarshal([]byte(`value = "1h30m"`+"\n"), &got); err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		if got.Value != 90*time.Minute {
+			t.Fatalf("Value = %v, want %v", got.Value, 90*time.Minute)
+		}
+	})
+}
+
+func TestDirectDecodeBytesCopyStringsOption(t *testing.T) {
+	t.Run("aliases input by default", func(t *testing.T) {
+		data := []byte(`value = "abc"` + "\n")
+		value := runDirectDecodeBytesFromData(t, data)
+		value[0] = 'z'
+		if !bytes.Contains(data, []byte(`"zbc"`)) {
+			t.Fatalf("decoded bytes did not alias input: data = %q", data)
+		}
+	})
+
+	t.Run("copies when requested", func(t *testing.T) {
+		data := []byte(`value = "abc"` + "\n")
+		value := runDirectDecodeBytesFromData(t, data, WithCopiedStrings())
+		value[0] = 'z'
+		if bytes.Contains(data, []byte(`"zbc"`)) {
+			t.Fatalf("decoded bytes mutated input despite WithCopiedStrings: data = %q", data)
+		}
+	})
+}
+
+func runDirectGenericDecodeParity[T any](t *testing.T, input string) T {
+	t.Helper()
+
+	data := []byte(input)
+	var direct T
+	if err := Unmarshal(data, &direct); err != nil {
+		t.Fatalf("direct Unmarshal(%q) error = %v", input, err)
+	}
+
+	var generic T
+	withDirectEligibility(t, reflect.TypeFor[T](), false, func() {
+		if err := Unmarshal(data, &generic); err != nil {
+			t.Fatalf("generic Unmarshal(%q) error = %v", input, err)
+		}
+	})
+
+	if !reflect.DeepEqual(direct, generic) {
+		t.Fatalf("direct/generic mismatch: direct=%#v generic=%#v", direct, generic)
+	}
+	return direct
+}
+
+func runDirectDecodeBytes(t *testing.T, input string) []byte {
+	t.Helper()
+	return runDirectDecodeBytesFromData(t, []byte(input))
+}
+
+func runDirectDecodeBytesFromData(t *testing.T, data []byte, opts ...Option) []byte {
+	t.Helper()
+	type config struct {
+		Value []byte `toml:"value"`
+	}
+	var got config
+	if err := (UnmarshalOptions{DecoderOptions: opts}).Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal(%q) error = %v", data, err)
+	}
+	return got.Value
+}
+
+func withDirectEligibility(t *testing.T, typ reflect.Type, eligible bool, f func()) {
+	t.Helper()
+	old, hadOld := directStructEligibilityCache.Load(typ)
+	directStructEligibilityCache.Store(typ, eligible)
+	defer func() {
+		if hadOld {
+			directStructEligibilityCache.Store(typ, old)
+			return
+		}
+		directStructEligibilityCache.Delete(typ)
+	}()
+	f()
 }
 
 func TestProperty_DecoderConstructorParity(t *testing.T) {
