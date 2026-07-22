@@ -445,3 +445,74 @@ func tokenTraceEqual(a, b []documentTokenTrace) bool {
 	}
 	return true
 }
+
+func TestDocumentSetStringControlCharacters(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		source  string
+		value   string
+		want    string
+		wantErr error
+	}{
+		"success: literal style preserved for safe value": {
+			source: "title = 'old'\n",
+			value:  "new value",
+			want:   "title = 'new value'\n",
+		},
+		"success: literal falls back to basic on newline": {
+			source: "title = 'old'\n",
+			value:  "line1\nline2",
+			want:   "title = \"line1\\nline2\"\n",
+		},
+		"success: literal falls back to basic on bell": {
+			source: "title = 'old'\n",
+			value:  "bell\x07end",
+		},
+		"success: basic escapes delete": {
+			source: "title = \"old\"\n",
+			value:  "del\x7fend",
+		},
+		"error: invalid utf8": {
+			source:  "title = 'old'\n",
+			value:   string([]byte{'x', 0xff}),
+			wantErr: errInvalidUTF8,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			doc, err := ParseDocument([]byte(tc.source))
+			if err != nil {
+				t.Fatalf("ParseDocument(%q) error = %v", tc.source, err)
+			}
+			err = doc.Set("title", tc.value)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Set(%q) error = %v, want %v", tc.value, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Set(%q) error = %v", tc.value, err)
+			}
+			out := doc.Bytes()
+			if tc.want != "" && string(out) != tc.want {
+				t.Fatalf("document = %q, want %q", out, tc.want)
+			}
+			for _, b := range out {
+				if b == 0x7f || (b < 0x20 && b != '\n' && b != '\t') {
+					t.Fatalf("document contains raw control byte %#x: %q", b, out)
+				}
+			}
+			var decoded map[string]string
+			if err := Unmarshal(out, &decoded); err != nil {
+				t.Fatalf("Unmarshal(%q) error = %v", out, err)
+			}
+			if got := decoded["title"]; got != tc.value {
+				t.Fatalf("round trip = %q, want %q", got, tc.value)
+			}
+		})
+	}
+}

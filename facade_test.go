@@ -21,7 +21,6 @@ import (
 	"io"
 	"math"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -676,24 +675,94 @@ labels = ["x", "y"]
 	}
 }
 
-func TestMarshalWriteQuotedStringMatchesStrconvQuote(t *testing.T) {
+func TestMarshalWriteQuotedString(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		input   string
+		want    string
+		wantErr error
+	}{
+		"success: ascii":           {input: "simple text", want: `"simple text"`},
+		"success: quote backslash": {input: "quote \" and slash \\", want: `"quote \" and slash \\"`},
+		"success: named escapes":   {input: "\b\t\n\f\r", want: `"\b\t\n\f\r"`},
+		"success: control unicode": {input: "nul\x00 esc\x1b bell\x07 vt\x0b", want: `"nul\u0000 esc\u001B bell\u0007 vt\u000B"`},
+		"success: delete":          {input: "del\x7f.", want: `"del\u007F."`},
+		"success: c1 control":      {input: "c1\u0085.", want: `"c1\u0085."`},
+		"success: unicode":         {input: "snowman ☃ and 日本語", want: `"snowman ☃ and 日本語"`},
+		"error: invalid utf8":      {input: string([]byte{'o', 'k', 0xff}), wantErr: errInvalidUTF8},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			err := writeQuotedString(&buf, tc.input)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("writeQuotedString(%q) error = %v, want %v", tc.input, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("writeQuotedString(%q) error = %v", tc.input, err)
+			}
+			if got := buf.String(); got != tc.want {
+				t.Fatalf("writeQuotedString(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMarshalControlCharacterRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"success: ascii":           "simple text",
-		"success: quote backslash": "quote \" and slash \\",
-		"success: control":         "line\n tab\t nul\x00",
-		"success: unicode":         "snowman ☃ and 日本語",
-		"success: invalid utf8":    string([]byte{'o', 'k', 0xff}),
+		"success: delete":     "before\x7fafter",
+		"success: nul":        "nul\x00",
+		"success: bell":       "bell\x07",
+		"success: vt":         "vt\x0b",
+		"success: esc":        "esc\x1b",
+		"success: tab":        "tab\there",
+		"success: newline":    "line1\nline2",
+		"success: c1 control": "c1\u0085tail",
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := map[string]string{"value": value, "key" + value: "v"}
+			data, err := Marshal(in)
+			if err != nil {
+				t.Fatalf("Marshal(%q) error = %v", value, err)
+			}
+			var out map[string]string
+			if err := Unmarshal(data, &out); err != nil {
+				t.Fatalf("Unmarshal(%q) error = %v", data, err)
+			}
+			if !reflect.DeepEqual(out, in) {
+				t.Fatalf("round trip = %#v, want %#v (document: %q)", out, in, data)
+			}
+		})
+	}
+}
+
+func TestMarshalInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	invalid := string([]byte{'b', 'a', 'd', 0xff})
+	tests := map[string]any{
+		"error: invalid utf8 value":      map[string]string{"key": invalid},
+		"error: invalid utf8 key":        map[string]string{invalid: "value"},
+		"error: invalid utf8 nested key": map[string]any{"outer": map[string]any{invalid: "value"}},
+		"error: invalid utf8 table name": map[string]any{invalid: map[string]any{"a": "b"}},
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			var buf bytes.Buffer
-			writeQuotedString(&buf, input)
-			if got, want := buf.String(), strconv.Quote(input); got != want {
-				t.Fatalf("writeQuotedString(%q) = %q, want %q", input, got, want)
+			if _, err := Marshal(input); !errors.Is(err, errInvalidUTF8) {
+				t.Fatalf("Marshal(%#v) error = %v, want %v", input, err, errInvalidUTF8)
 			}
 		})
 	}
@@ -710,6 +779,7 @@ func TestMarshalASCIIQuoteEscapeIndex(t *testing.T) {
 		"success: quote":            {input: `needs"quote`, want: 5},
 		"success: backslash":        {input: `needs\\slash`, want: 5},
 		"success: control fallback": {input: "line\n", want: quoteFallback},
+		"success: delete fallback":  {input: "del\x7f", want: quoteFallback},
 		"success: unicode fallback": {input: "snowman ☃", want: quoteFallback},
 	}
 	for name, tc := range tests {
@@ -749,7 +819,7 @@ func TestMarshalWriteSpecialValueHandlesOnlySpecialTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writeSpecialValue(TextMarshaler) error = %v", err)
 	}
-	if !ok || buf.String() != strconv.Quote("needs\nquote") {
+	if !ok || buf.String() != `"needs\nquote"` {
 		t.Fatalf("writeSpecialValue(TextMarshaler) = ok:%v buf:%q, want quoted text", ok, buf.String())
 	}
 }

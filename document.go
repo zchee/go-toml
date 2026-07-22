@@ -21,9 +21,9 @@ import (
 	"io"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Document is a format-preserving TOML document.
@@ -602,7 +602,7 @@ func (d *Document) formatValueForPath(pathKey string, value any) ([]byte, error)
 		switch entry.kind {
 		case documentKindString:
 			if s, ok := value.(string); ok {
-				return formatStringLike(entry.valueRaw, s), nil
+				return formatStringLike(entry.valueRaw, s)
 			}
 		case documentKindBool, documentKindInteger, documentKindFloat, documentKindDatetime:
 			return formatDocumentValue(value)
@@ -649,7 +649,9 @@ func formatDocumentKeyValue(path []string, value any) ([]byte, error) {
 		if i > 0 {
 			buf.WriteByte('.')
 		}
-		buf.WriteString(formatKey(part))
+		if err := writeKey(&buf, part); err != nil {
+			return nil, err
+		}
 	}
 	buf.WriteString(" = ")
 	buf.Write(valueBytes)
@@ -665,13 +667,36 @@ func formatDocumentValue(value any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func formatStringLike(existing []byte, value string) []byte {
+func formatStringLike(existing []byte, value string) ([]byte, error) {
 	trimmed := bytes.TrimSpace(existing)
 	if len(trimmed) >= 2 && trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'' &&
-		!strings.ContainsAny(value, "'\n\r") {
-		return []byte("'" + value + "'")
+		literalStringSafe(value) {
+		return []byte("'" + value + "'"), nil
 	}
-	return []byte(strconv.Quote(value))
+	return appendBasicString(nil, value)
+}
+
+// literalStringSafe reports whether value can be carried verbatim inside a
+// single-line TOML literal string: no single quote, no control characters
+// other than tab (including DEL and the C1 range, which appendBasicString
+// also escapes), and valid UTF-8.
+func literalStringSafe(s string) bool {
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			if c == '\'' || c == 0x7f || (c < 0x20 && c != '\t') {
+				return false
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || r <= 0x9f {
+			return false
+		}
+		i += size
+	}
+	return true
 }
 
 func (d *Document) entryForPathKey(pathKey string) (*documentEntry, bool) {

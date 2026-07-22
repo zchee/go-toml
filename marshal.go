@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding"
+	"errors"
 	"math"
 	"reflect"
 	"slices"
@@ -25,6 +26,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zchee/go-toml/internal/reflectcache"
 )
@@ -124,7 +126,9 @@ func encodeStructDocument(buf *bytes.Buffer, v reflect.Value, path []string) err
 			nextPath := appendPath(path, entry.name)
 			for i := range items.Len() {
 				buf.WriteByte('\n')
-				writeHeader(buf, nextPath, true)
+				if err := writeHeader(buf, nextPath, true); err != nil {
+					return err
+				}
 				if err := encodeDocument(buf, items.Index(i), nextPath); err != nil {
 					return err
 				}
@@ -133,7 +137,9 @@ func encodeStructDocument(buf *bytes.Buffer, v reflect.Value, path []string) err
 		}
 		buf.WriteByte('\n')
 		nextPath := appendPath(path, entry.name)
-		writeHeader(buf, nextPath, false)
+		if err := writeHeader(buf, nextPath, false); err != nil {
+			return err
+		}
 		if err := encodeDocument(buf, entry.value, nextPath); err != nil {
 			return err
 		}
@@ -158,7 +164,9 @@ func encodeEntriesDocument(buf *bytes.Buffer, entries []marshalEntry, path []str
 			nextPath := appendPath(path, entry.name)
 			for i := range items.Len() {
 				buf.WriteByte('\n')
-				writeHeader(buf, nextPath, true)
+				if err := writeHeader(buf, nextPath, true); err != nil {
+					return err
+				}
 				if err := encodeDocument(buf, items.Index(i), nextPath); err != nil {
 					return err
 				}
@@ -167,7 +175,9 @@ func encodeEntriesDocument(buf *bytes.Buffer, entries []marshalEntry, path []str
 		}
 		buf.WriteByte('\n')
 		nextPath := appendPath(path, entry.name)
-		writeHeader(buf, nextPath, false)
+		if err := writeHeader(buf, nextPath, false); err != nil {
+			return err
+		}
 		if err := encodeDocument(buf, entry.value, nextPath); err != nil {
 			return err
 		}
@@ -196,7 +206,9 @@ func encodeMapDocument(buf *bytes.Buffer, v reflect.Value, path []string) error 
 			nextPath := appendPath(path, entry.name)
 			for i := range items.Len() {
 				buf.WriteByte('\n')
-				writeHeader(buf, nextPath, true)
+				if err := writeHeader(buf, nextPath, true); err != nil {
+					return err
+				}
 				if err := encodeDocument(buf, items.Index(i), nextPath); err != nil {
 					return err
 				}
@@ -205,7 +217,9 @@ func encodeMapDocument(buf *bytes.Buffer, v reflect.Value, path []string) error 
 		}
 		buf.WriteByte('\n')
 		nextPath := appendPath(path, entry.name)
-		writeHeader(buf, nextPath, false)
+		if err := writeHeader(buf, nextPath, false); err != nil {
+			return err
+		}
 		if err := encodeDocument(buf, entry.value, nextPath); err != nil {
 			return err
 		}
@@ -235,7 +249,9 @@ func encodeAnyMapDocument(buf *bytes.Buffer, m map[string]any, path []string) er
 			nextPath := appendPath(path, key)
 			for i := range items {
 				buf.WriteByte('\n')
-				writeHeader(buf, nextPath, true)
+				if err := writeHeader(buf, nextPath, true); err != nil {
+					return err
+				}
 				if err := encodeAnyDocument(buf, items[i], nextPath); err != nil {
 					return err
 				}
@@ -244,7 +260,9 @@ func encodeAnyMapDocument(buf *bytes.Buffer, m map[string]any, path []string) er
 		}
 		buf.WriteByte('\n')
 		nextPath := appendPath(path, key)
-		writeHeader(buf, nextPath, false)
+		if err := writeHeader(buf, nextPath, false); err != nil {
+			return err
+		}
 		if err := encodeAnyDocument(buf, value, nextPath); err != nil {
 			return err
 		}
@@ -261,8 +279,19 @@ func encodeAnyDocument(buf *bytes.Buffer, value any, path []string) error {
 	}
 }
 
+func writeKey(buf *bytes.Buffer, key string) error {
+	k, err := formatKey(key)
+	if err != nil {
+		return err
+	}
+	buf.WriteString(k)
+	return nil
+}
+
 func writeKeyValue(buf *bytes.Buffer, key string, v reflect.Value) error {
-	buf.WriteString(formatKey(key))
+	if err := writeKey(buf, key); err != nil {
+		return err
+	}
 	buf.WriteString(" = ")
 	if err := writeValue(buf, v); err != nil {
 		return err
@@ -272,7 +301,9 @@ func writeKeyValue(buf *bytes.Buffer, key string, v reflect.Value) error {
 }
 
 func writeKeyValueAny(buf *bytes.Buffer, key string, value any) error {
-	buf.WriteString(formatKey(key))
+	if err := writeKey(buf, key); err != nil {
+		return err
+	}
 	buf.WriteString(" = ")
 	if err := writeAnyValue(buf, value); err != nil {
 		return err
@@ -281,7 +312,7 @@ func writeKeyValueAny(buf *bytes.Buffer, key string, value any) error {
 	return nil
 }
 
-func writeHeader(buf *bytes.Buffer, path []string, array bool) {
+func writeHeader(buf *bytes.Buffer, path []string, array bool) error {
 	if array {
 		buf.WriteString("[[")
 	} else {
@@ -291,13 +322,16 @@ func writeHeader(buf *bytes.Buffer, path []string, array bool) {
 		if i > 0 {
 			buf.WriteByte('.')
 		}
-		buf.WriteString(formatKey(p))
+		if err := writeKey(buf, p); err != nil {
+			return err
+		}
 	}
 	if array {
 		buf.WriteString("]]\n")
 	} else {
 		buf.WriteString("]\n")
 	}
+	return nil
 }
 
 //nolint:cyclop // dispatch over all reflect kinds for TOML encoding; cohesive.
@@ -311,8 +345,7 @@ func writeValue(buf *bytes.Buffer, v reflect.Value) error {
 	}
 	switch v.Kind() {
 	case reflect.String:
-		writeQuotedString(buf, v.String())
-		return nil
+		return writeQuotedString(buf, v.String())
 	case reflect.Bool:
 		b := buf.AvailableBuffer()
 		b = strconv.AppendBool(b, v.Bool())
@@ -361,8 +394,7 @@ func writeAnyValue(buf *bytes.Buffer, value any) error {
 	case nil:
 		return &UnsupportedTypeError{Type: "nil"}
 	case string:
-		writeQuotedString(buf, x)
-		return nil
+		return writeQuotedString(buf, x)
 	case bool:
 		b := buf.AvailableBuffer()
 		b = strconv.AppendBool(b, x)
@@ -468,8 +500,7 @@ func writeAnyValue(buf *bytes.Buffer, value any) error {
 		if err != nil {
 			return err
 		}
-		writeQuotedString(buf, string(text))
-		return nil
+		return writeQuotedString(buf, string(text))
 	case []any:
 		buf.WriteByte('[')
 		for i, item := range x {
@@ -537,28 +568,34 @@ func writeSpecialValue(buf *bytes.Buffer, v reflect.Value) (bool, error) {
 		if err != nil {
 			return true, err
 		}
-		writeQuotedString(buf, string(text))
-		return true, nil
+		return true, writeQuotedString(buf, string(text))
 	default:
 		return false, nil
 	}
 }
 
-func writeQuotedString(buf *bytes.Buffer, s string) {
+// errInvalidUTF8 reports a Go string that has no TOML representation:
+// TOML strings hold Unicode code points, so malformed UTF-8 cannot be
+// carried raw or through any escape sequence.
+var errInvalidUTF8 = errors.New("toml: cannot encode string containing invalid UTF-8")
+
+func writeQuotedString(buf *bytes.Buffer, s string) error {
 	switch first := asciiQuoteEscapeIndex(s); first {
 	case -1:
 		buf.WriteByte('"')
 		buf.WriteString(s)
 		buf.WriteByte('"')
-		return
+		return nil
 	case quoteFallback:
-		b := buf.AvailableBuffer()
-		b = strconv.AppendQuote(b, s)
+		b, err := appendBasicString(buf.AvailableBuffer(), s)
+		if err != nil {
+			return err
+		}
 		buf.Write(b)
-		return
+		return nil
 	default:
 		writeQuotedASCIIString(buf, s, first)
-		return
+		return nil
 	}
 }
 
@@ -567,7 +604,7 @@ func asciiQuoteEscapeIndex(s string) int {
 	for i := range len(s) {
 		c := s[i]
 		switch {
-		case c < 0x20 || c >= 0x80:
+		case c < 0x20 || c >= 0x7f:
 			return quoteFallback
 		case c == '"' || c == '\\':
 			if first < 0 {
@@ -576,6 +613,67 @@ func asciiQuoteEscapeIndex(s string) int {
 		}
 	}
 	return first
+}
+
+// appendBasicString appends s quoted as a single-line TOML basic string.
+// Only escape forms shared by TOML 1.0 and 1.1 are emitted: the named
+// escapes for \b, \t, \n, \f, \r, quotation mark, and backslash, and
+// \u00XX for the remaining control characters (U+0000..U+001F, U+007F,
+// and the C1 range U+0080..U+009F, which is escaped for robustness even
+// though the spec permits it raw).
+func appendBasicString(b []byte, s string) ([]byte, error) {
+	const hexDigits = "0123456789ABCDEF"
+	b = append(b, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c >= 0x20 && c < 0x7f {
+			if c == '"' || c == '\\' {
+				b = append(b, s[start:i]...)
+				b = append(b, '\\', c)
+				i++
+				start = i
+				continue
+			}
+			i++
+			continue
+		}
+		if c < utf8.RuneSelf {
+			b = append(b, s[start:i]...)
+			switch c {
+			case '\b':
+				b = append(b, '\\', 'b')
+			case '\t':
+				b = append(b, '\\', 't')
+			case '\n':
+				b = append(b, '\\', 'n')
+			case '\f':
+				b = append(b, '\\', 'f')
+			case '\r':
+				b = append(b, '\\', 'r')
+			default:
+				b = append(b, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0x0f])
+			}
+			i++
+			start = i
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			return nil, errInvalidUTF8
+		}
+		if r <= 0x9f {
+			b = append(b, s[start:i]...)
+			b = append(b, '\\', 'u', '0', '0', hexDigits[byte(r)>>4], hexDigits[byte(r)&0x0f])
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	b = append(b, s[start:]...)
+	b = append(b, '"')
+	return b, nil
 }
 
 func writeQuotedASCIIString(buf *bytes.Buffer, s string, first int) {
@@ -633,7 +731,9 @@ func writeInlineTable(buf *bytes.Buffer, v reflect.Value) error {
 			if i > 0 {
 				buf.WriteString(", ")
 			}
-			buf.WriteString(formatKey(entry.name))
+			if err := writeKey(buf, entry.name); err != nil {
+				return err
+			}
 			buf.WriteString(" = ")
 			if err := writeValue(buf, entry.value); err != nil {
 				return err
@@ -658,7 +758,9 @@ func writeInlineAnyMap(buf *bytes.Buffer, m map[string]any) error {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		buf.WriteString(formatKey(key))
+		if err := writeKey(buf, key); err != nil {
+			return err
+		}
 		buf.WriteString(" = ")
 		if err := writeAnyValue(buf, m[key]); err != nil {
 			return err
@@ -682,7 +784,9 @@ func writeInlineStructTable(buf *bytes.Buffer, v reflect.Value) error {
 			if i > 0 {
 				buf.WriteString(", ")
 			}
-			buf.WriteString(formatKey(entry.name))
+			if err := writeKey(buf, entry.name); err != nil {
+				return err
+			}
 			buf.WriteString(" = ")
 			if err := writeValue(buf, entry.value); err != nil {
 				return err
@@ -700,7 +804,9 @@ func writeInlineStructTable(buf *bytes.Buffer, v reflect.Value) error {
 			buf.WriteString(", ")
 		}
 		first = false
-		buf.WriteString(formatKey(field.Name))
+		if err := writeKey(buf, field.Name); err != nil {
+			return err
+		}
 		buf.WriteString(" = ")
 		if err := writeValue(buf, value); err != nil {
 			return err
@@ -1092,15 +1198,19 @@ func hasNonEmptyTableLikeDescendantAny(v any) bool {
 	}
 }
 
-func formatKey(key string) string {
+func formatKey(key string) (string, error) {
 	if key == "" {
-		return strconv.Quote(key)
+		return `""`, nil
 	}
 	for _, r := range key {
 		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
 			continue
 		}
-		return strconv.Quote(key)
+		b, err := appendBasicString(make([]byte, 0, len(key)+2), key)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
 	}
-	return key
+	return key, nil
 }
