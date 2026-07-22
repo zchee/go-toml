@@ -2,11 +2,9 @@
 #
 # Go 1.26 variant of pandaemonium's toml-test.yaml: the module targets
 # stable Go 1.26, so actions/setup-go resolves the toolchain from go.mod
-# directly instead of bootstrapping gotip. The matrix covers the amd64
-# SWAR and arm64 NEON internal/scan backends; the GOEXPERIMENT=simd
-# AVX2 leg is blocked until internal/scan tracks the upstream archsimd
-# API, which differs from the dev toolchain it was written against
-# (upstream LoadUint8x32 takes *[32]uint8, not a slice).
+# directly instead of bootstrapping gotip. The matrix covers the three
+# internal/scan kernel backends: amd64 SWAR, amd64 AVX2/SSE2
+# (GOEXPERIMENT=simd), and arm64 NEON.
 name: toml-test
 
 on:
@@ -25,13 +23,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
+        include:
+          - runner: ubuntu-24.04
+            goexperiment: ""
+          - runner: ubuntu-24.04
+            goexperiment: "simd"
+          - runner: ubuntu-24.04-arm
+            goexperiment: ""
     runs-on: ${{ matrix.runner }}
 
     permissions:
       contents: read
+
+    env:
+      GOEXPERIMENT: ${{ matrix.goexperiment }}
 
     steps:
       - uses: actions/checkout@v7

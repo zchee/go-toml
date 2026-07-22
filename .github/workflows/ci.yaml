@@ -2,9 +2,9 @@
 #
 # Runs go vet plus the full test suite (including the -race -shuffle=on
 # variant from AGENTS.md) on stable Go 1.26 resolved from go.mod. The
-# matrix mirrors toml-test.yaml: amd64 SWAR and arm64 NEON backends;
-# the GOEXPERIMENT=simd AVX2 leg is blocked until internal/scan tracks
-# the upstream archsimd API.
+# matrix mirrors toml-test.yaml so every internal/scan kernel backend is
+# exercised: amd64 SWAR, amd64 AVX2/SSE2 (GOEXPERIMENT=simd), and arm64
+# NEON.
 name: ci
 
 on:
@@ -23,13 +23,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
+        include:
+          - runner: ubuntu-24.04
+            goexperiment: ""
+          - runner: ubuntu-24.04
+            goexperiment: "simd"
+          - runner: ubuntu-24.04-arm
+            goexperiment: ""
     runs-on: ${{ matrix.runner }}
 
     permissions:
       contents: read
+
+    env:
+      GOEXPERIMENT: ${{ matrix.goexperiment }}
 
     steps:
       - uses: actions/checkout@v7
