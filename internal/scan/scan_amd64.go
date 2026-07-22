@@ -19,7 +19,6 @@ package scan
 import (
 	"math/bits"
 	"simd/archsimd"
-	"unicode/utf8"
 )
 
 // scan_amd64.go contains the SSE2 (16-byte) and AVX2 (32-byte) variants
@@ -267,19 +266,26 @@ func skipWhitespaceAVX2(s []byte) int {
 func locateNewlineAVX2(s []byte) int
 
 func validateUTF8AVX2(s []byte) int {
+	i := validateUTF8ASCIIAVX2(s)
+	if i == len(s) {
+		return len(s)
+	}
+	return i + validateUTF8Scalar(s[i:])
+}
+
+func validateUTF8ASCIIAVX2(s []byte) int {
 	i := 0
 	hi := archsimd.BroadcastUint8x32(0x80)
 	for i+32 <= len(s) {
 		v := archsimd.LoadUint8x32Slice(s[i:])
-		// any byte >= 0x80 (unsigned) has its high bit set
 		m := v.GreaterEqual(hi)
 		if m.ToBits() == 0 {
 			i += 32
 			continue
 		}
-		break
+		return i + bits.TrailingZeros32(m.ToBits())
 	}
-	return i + validateUTF8Scalar(s[i:])
+	return i + validateUTF8ASCIISSE2(s[i:])
 }
 
 // =====================================================================
@@ -446,6 +452,14 @@ func skipWhitespaceSSE2(s []byte) int {
 func locateNewlineSSE2(s []byte) int
 
 func validateUTF8SSE2(s []byte) int {
+	i := validateUTF8ASCIISSE2(s)
+	if i == len(s) {
+		return len(s)
+	}
+	return i + validateUTF8Scalar(s[i:])
+}
+
+func validateUTF8ASCIISSE2(s []byte) int {
 	i := 0
 	hi := archsimd.BroadcastUint8x16(0x80)
 	for i+16 <= len(s) {
@@ -455,29 +469,73 @@ func validateUTF8SSE2(s []byte) int {
 			i += 16
 			continue
 		}
-		break
+		return i + bits.TrailingZeros16(m.ToBits())
 	}
-	return i + validateUTF8Scalar(s[i:])
+	for ; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return i
+		}
+	}
+	return len(s)
 }
 
-// validateUTF8Scalar is the non-SIMD continuation called from both
-// validateUTF8AVX2 and validateUTF8SSE2 once the ASCII fast path
-// encounters a high-bit byte. It loops byte-by-byte, advancing by
-// unicode/utf8.DecodeRune for multi-byte sequences and reporting the
-// first byte of the first invalid sequence.
 func validateUTF8Scalar(s []byte) int {
 	i := 0
 	for i < len(s) {
-		b := s[i]
-		if b < 0x80 {
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRune(s[i:])
-		if r == utf8.RuneError && size == 1 {
+		size := validateUTF8SequenceSize(s, i)
+		if size == 0 {
 			return i
 		}
 		i += size
 	}
 	return len(s)
 }
+
+func validateUTF8SequenceSize(s []byte, i int) int {
+	b0 := s[i]
+	switch {
+	case b0 < 0x80:
+		return 1
+	case b0 < 0xC2:
+		return 0
+	case b0 < 0xE0:
+		if i+1 < len(s) && utf8Continuation(s[i+1]) {
+			return 2
+		}
+		return 0
+	case b0 < 0xF0:
+		if i+2 >= len(s) {
+			return 0
+		}
+		b1 := s[i+1]
+		if !utf8Continuation(b1) || !utf8Continuation(s[i+2]) {
+			return 0
+		}
+		if b0 == 0xE0 && b1 < 0xA0 {
+			return 0
+		}
+		if b0 == 0xED && b1 >= 0xA0 {
+			return 0
+		}
+		return 3
+	case b0 < 0xF5:
+		if i+3 >= len(s) {
+			return 0
+		}
+		b1 := s[i+1]
+		if !utf8Continuation(b1) || !utf8Continuation(s[i+2]) || !utf8Continuation(s[i+3]) {
+			return 0
+		}
+		if b0 == 0xF0 && b1 < 0x90 {
+			return 0
+		}
+		if b0 == 0xF4 && b1 >= 0x90 {
+			return 0
+		}
+		return 4
+	default:
+		return 0
+	}
+}
+
+func utf8Continuation(b byte) bool { return b >= 0x80 && b <= 0xBF }

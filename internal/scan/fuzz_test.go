@@ -89,16 +89,23 @@ func addUTF8Seeds(f *testing.F) {
 	f.Add([]byte{0xEF, 0xBB, 0xBF, 'h', 'i'})
 	// Overlong encoding of NUL (invalid).
 	f.Add([]byte{0xC0, 0x80})
+	f.Add([]byte{0xE0, 0x80, 0x80})
+	f.Add([]byte{0xF0, 0x80, 0x80, 0x80})
 	// High surrogate (invalid in UTF-8).
 	f.Add([]byte{0xED, 0xA0, 0x80})
 	// Low surrogate (invalid in UTF-8).
 	f.Add([]byte{0xED, 0xBF, 0xBF})
+	f.Add([]byte{0xF4, 0x90, 0x80, 0x80})
 	// Truncated 2-byte sequence.
 	f.Add([]byte{0xC3})
 	// Truncated 3-byte sequence.
 	f.Add([]byte{0xE2, 0x82})
 	// Truncated 4-byte sequence.
 	f.Add([]byte{0xF0, 0x9D, 0x84})
+	f.Add([]byte{0xC2, 'x'})
+	f.Add([]byte{0xE2, 'x', 0x80})
+	f.Add([]byte{0xF0, 'x', 0x80, 0x80})
+	f.Add([]byte("ok 世界\x80"))
 	// Valid 2-byte sequence (é).
 	f.Add([]byte{0xC3, 0xA9})
 	// Valid 3-byte sequence (€).

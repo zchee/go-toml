@@ -14,7 +14,10 @@
 
 package scan
 
-import "unicode/utf8"
+import (
+	"testing"
+	"unicode/utf8"
+)
 
 // naive_scan_test.go is the load-bearing correctness oracle for every
 // dispatched implementation in this package. The naiveX functions
@@ -150,4 +153,39 @@ func naiveValidateUTF8(s []byte) int {
 		i += size
 	}
 	return len(s)
+}
+
+func TestValidateUTF8_reportsInvalidSequenceStart_forEveryInvalidClass(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want int
+	}{
+		{name: "overlong 2-byte NUL", data: []byte{0xC0, 0x80}, want: 0},
+		{name: "overlong 3-byte NUL", data: []byte{0xE0, 0x80, 0x80}, want: 0},
+		{name: "overlong 4-byte NUL", data: []byte{0xF0, 0x80, 0x80, 0x80}, want: 0},
+		{name: "surrogate high half", data: []byte{0xED, 0xA0, 0x80}, want: 0},
+		{name: "surrogate low half", data: []byte{0xED, 0xBF, 0xBF}, want: 0},
+		{name: "above U+10FFFF", data: []byte{0xF4, 0x90, 0x80, 0x80}, want: 0},
+		{name: "truncated 2-byte", data: []byte{'a', 0xC2}, want: 1},
+		{name: "truncated 3-byte", data: []byte{'a', 0xE2, 0x82}, want: 1},
+		{name: "truncated 4-byte", data: []byte{'a', 0xF0, 0x9D, 0x84}, want: 1},
+		{name: "lone continuation", data: []byte{'a', 0x80}, want: 1},
+		{name: "2-byte lead without continuation", data: []byte{'a', 0xC2, 'b'}, want: 1},
+		{name: "3-byte lead without continuation", data: []byte{'a', 0xE2, 'b', 0x80}, want: 1},
+		{name: "4-byte lead without continuation", data: []byte{'a', 0xF0, 'b', 0x80, 0x80}, want: 1},
+		{name: "invalid after valid multibyte", data: []byte("ok 世界\x80"), want: len([]byte("ok 世界"))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateUTF8(tt.data)
+			if got != tt.want {
+				t.Fatalf("ValidateUTF8(%x) = %d, want %d", tt.data, got, tt.want)
+			}
+			if oracle := naiveValidateUTF8(tt.data); oracle != tt.want {
+				t.Fatalf("naiveValidateUTF8(%x) = %d, want %d", tt.data, oracle, tt.want)
+			}
+		})
+	}
 }

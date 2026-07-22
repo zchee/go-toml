@@ -16,8 +16,6 @@
 
 package scan
 
-import "unicode/utf8"
-
 // scan_arm64.go contains the NEON variants of every scan kernel,
 // implemented as hand-rolled Plan 9 assembly in scan_arm64.s. NEON
 // (ASIMD) is ABI-guaranteed on every arm64 host, so the dispatch vars
@@ -119,29 +117,68 @@ func validateUTF8NEONBulk(s []byte) int
 func validateUTF8NEON(s []byte) int {
 	i := validateUTF8NEONBulk(s)
 	if i == len(s) {
-		return i
+		return len(s)
 	}
-	return i + validateUTF8NEONScalar(s[i:])
+	return i + validateUTF8Scalar(s[i:])
 }
 
-// validateUTF8NEONScalar is the non-SIMD continuation called from
-// validateUTF8NEON once the ASCII fast path encounters a high-bit byte.
-// It loops byte-by-byte, advancing by unicode/utf8.DecodeRune for
-// multi-byte sequences and reporting the first byte of the first
-// invalid sequence.
-func validateUTF8NEONScalar(s []byte) int {
+func validateUTF8Scalar(s []byte) int {
 	i := 0
 	for i < len(s) {
-		b := s[i]
-		if b < 0x80 {
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRune(s[i:])
-		if r == utf8.RuneError && size == 1 {
+		size := validateUTF8SequenceSize(s, i)
+		if size == 0 {
 			return i
 		}
 		i += size
 	}
 	return len(s)
 }
+
+func validateUTF8SequenceSize(s []byte, i int) int {
+	b0 := s[i]
+	switch {
+	case b0 < 0x80:
+		return 1
+	case b0 < 0xC2:
+		return 0
+	case b0 < 0xE0:
+		if i+1 < len(s) && utf8Continuation(s[i+1]) {
+			return 2
+		}
+		return 0
+	case b0 < 0xF0:
+		if i+2 >= len(s) {
+			return 0
+		}
+		b1 := s[i+1]
+		if !utf8Continuation(b1) || !utf8Continuation(s[i+2]) {
+			return 0
+		}
+		if b0 == 0xE0 && b1 < 0xA0 {
+			return 0
+		}
+		if b0 == 0xED && b1 >= 0xA0 {
+			return 0
+		}
+		return 3
+	case b0 < 0xF5:
+		if i+3 >= len(s) {
+			return 0
+		}
+		b1 := s[i+1]
+		if !utf8Continuation(b1) || !utf8Continuation(s[i+2]) || !utf8Continuation(s[i+3]) {
+			return 0
+		}
+		if b0 == 0xF0 && b1 < 0x90 {
+			return 0
+		}
+		if b0 == 0xF4 && b1 >= 0x90 {
+			return 0
+		}
+		return 4
+	default:
+		return 0
+	}
+}
+
+func utf8Continuation(b byte) bool { return b >= 0x80 && b <= 0xBF }
