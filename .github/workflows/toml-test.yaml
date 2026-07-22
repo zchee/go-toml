@@ -1,0 +1,64 @@
+# go-toml conformance tests against toml-lang/toml-test.
+#
+# Go 1.26 variant of pandaemonium's toml-test.yaml: the module targets
+# stable Go 1.26, so actions/setup-go resolves the toolchain from go.mod
+# directly instead of bootstrapping gotip. The matrix covers the three
+# internal/scan kernel backends: amd64 SWAR, amd64 AVX2/SSE2
+# (GOEXPERIMENT=simd), and arm64 NEON.
+name: toml-test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  toml-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goexperiment: ""
+          - runner: ubuntu-24.04
+            goexperiment: "simd"
+          - runner: ubuntu-24.04-arm
+            goexperiment: ""
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: read
+
+    env:
+      GOEXPERIMENT: ${{ matrix.goexperiment }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build toml-test adapters
+        run: |
+          go version
+          mkdir -p bin
+          go build -o ./bin/toml-test-decoder ./internal/cmd/toml-test-decoder
+          go build -o ./bin/toml-test-encoder ./internal/cmd/toml-test-encoder
+
+      - name: Run TOML 1.1 implementation testsuite
+        env:
+          NO_COLOR: "1"
+        run: |-
+          go tool toml-test test \
+            -v \
+            -toml 1.1 \
+            -decoder=./bin/toml-test-decoder \
+            -encoder=./bin/toml-test-encoder
