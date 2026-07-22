@@ -47,7 +47,7 @@ func ValueToTaggedJSON(doc any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(tagged, jsontext.WithIndent("  "))
+	return json.Marshal(tagged, jsontext.WithIndent("  "), json.Deterministic(true))
 }
 
 // DecodeStdin is a helper function for the toml-test binary interface.  TOML input
@@ -65,7 +65,7 @@ func DecodeStdin() error {
 	if err != nil {
 		return fmt.Errorf("tagging decoded TOML: %w", err)
 	}
-	if err := json.MarshalEncode(j, tagged); err != nil {
+	if err := json.MarshalEncode(j, tagged, json.Deterministic(true)); err != nil {
 		return fmt.Errorf("error encoding JSON: %w", err)
 	}
 

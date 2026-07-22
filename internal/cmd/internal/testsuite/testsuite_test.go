@@ -44,7 +44,7 @@ func TestValueToTaggedJSONNestedPublicContainers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addTag() error = %v", err)
 	}
-	got, err := json.Marshal(tagged, jsontext.WithIndent("  "))
+	got, err := json.Marshal(tagged, jsontext.WithIndent("  "), json.Deterministic(true))
 	if err != nil {
 		t.Fatalf("json.MarshalIndent(addTag()) error = %v", err)
 	}
