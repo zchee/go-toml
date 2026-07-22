@@ -1,0 +1,59 @@
+# go-toml unit tests and static checks.
+#
+# Runs go vet plus the full test suite (including the -race -shuffle=on
+# variant from AGENTS.md) on stable Go 1.26 resolved from go.mod. The
+# matrix mirrors toml-test.yaml so every internal/scan kernel backend is
+# exercised: amd64 SWAR, amd64 AVX2/SSE2 (GOEXPERIMENT=simd), and arm64
+# NEON.
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goexperiment: ""
+          - runner: ubuntu-24.04
+            goexperiment: "simd"
+          - runner: ubuntu-24.04-arm
+            goexperiment: ""
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: read
+
+    env:
+      GOEXPERIMENT: ${{ matrix.goexperiment }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Vet
+        run: |
+          go version
+          go vet ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Test with race detector
+        run: |-
+          go test -race -count=1 -shuffle=on ./...
