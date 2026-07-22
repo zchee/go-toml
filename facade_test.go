@@ -193,6 +193,29 @@ func TestFacadeMarshalStructTagsOmitZeroAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMarshalReturnedBytesAreStable(t *testing.T) {
+	t.Parallel()
+
+	first, err := Marshal(map[string]any{"name": "alpha", "n": 1})
+	if err != nil {
+		t.Fatalf("Marshal() first error = %v", err)
+	}
+	firstCopy := append([]byte(nil), first...)
+
+	second, err := Marshal(map[string]any{"name": "bravo", "n": 2})
+	if err != nil {
+		t.Fatalf("Marshal() second error = %v", err)
+	}
+	_ = second
+
+	if got := string(first); got != string(firstCopy) {
+		t.Fatalf("first Marshal result mutated after second call\ngot:\n%s\nwant:\n%s", got, string(firstCopy))
+	}
+	if !bytes.Equal(first, firstCopy) {
+		t.Fatalf("first Marshal bytes changed after second call")
+	}
+}
+
 func TestMarshalDirectCompatibilityOutputShape(t *testing.T) {
 	t.Parallel()
 

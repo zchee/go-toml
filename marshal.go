@@ -47,6 +47,11 @@ const (
 )
 
 var stringKeysPool sync.Pool
+var marshalBufferPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
 
 func init() {
 	reflectcache.EncodeFieldFallback = encodeReflectcacheField
@@ -64,17 +69,71 @@ func Marshal(v any) ([]byte, error) {
 }
 
 func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
-	var buf bytes.Buffer
-	if hint := marshalSizeHint(v); hint > 0 {
+	hint := marshalSizeHint(v)
+	if hint > maxMarshalSizeHint {
+		var buf bytes.Buffer
+		if hint > 0 {
+			buf.Grow(hint)
+		}
+		if err := marshalToBufferDirect(&buf, v, opts); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	}
+
+	buf := getMarshalBuffer()
+	if hint > 0 {
 		buf.Grow(hint)
 	}
-	if err := marshalToBuffer(&buf, v, opts); err != nil {
+	if err := marshalToBufferDirect(buf, v, opts); err != nil {
+		putMarshalBuffer(buf)
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	if buf.Len() > maxMarshalSizeHint {
+		return buf.Bytes(), nil
+	}
+	out := append([]byte(nil), buf.Bytes()...)
+	putMarshalBuffer(buf)
+	return out, nil
+}
+
+func getMarshalBuffer() *bytes.Buffer {
+	buf := marshalBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return buf
+}
+
+func putMarshalBuffer(buf *bytes.Buffer) {
+	if buf == nil || buf.Cap() > maxMarshalSizeHint {
+		return
+	}
+	buf.Reset()
+	marshalBufferPool.Put(buf)
 }
 
 func marshalToBuffer(buf *bytes.Buffer, v any, opts MarshalOptions) error {
+	hint := marshalSizeHint(v)
+	if hint > maxMarshalSizeHint {
+		return marshalToBufferDirect(buf, v, opts)
+	}
+
+	scratch := getMarshalBuffer()
+	if hint > 0 {
+		scratch.Grow(hint)
+	}
+	if err := marshalToBufferDirect(scratch, v, opts); err != nil {
+		putMarshalBuffer(scratch)
+		return err
+	}
+	if _, err := buf.Write(scratch.Bytes()); err != nil {
+		putMarshalBuffer(scratch)
+		return err
+	}
+	putMarshalBuffer(scratch)
+	return nil
+}
+
+func marshalToBufferDirect(buf *bytes.Buffer, v any, opts MarshalOptions) error {
 	if m, ok := v.(MarshalerTo); ok {
 		return m.MarshalTOMLTo(NewEncoder(buf, opts))
 	}
