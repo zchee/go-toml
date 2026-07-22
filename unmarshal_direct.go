@@ -32,6 +32,11 @@ import (
 var errDirectUnknownField = errors.New("toml: direct destination field is unknown")
 
 var directStructEligibilityCache sync.Map // map[reflect.Type]bool
+var directRawPathExtraPool = sync.Pool{
+	New: func() any {
+		return new([][]byte)
+	},
+}
 
 type directAssignment struct {
 	name      string
@@ -63,6 +68,21 @@ type directRawPath struct {
 	stack [8][]byte
 	extra [][]byte
 	n     int
+}
+
+func (p *directRawPath) acquireExtra() {
+	if p.extra == nil {
+		p.extra = *directRawPathExtraPool.Get().(*[][]byte)
+	}
+}
+
+func (p *directRawPath) releaseExtra() {
+	if p.extra == nil {
+		return
+	}
+	extra := p.extra[:0]
+	directRawPathExtraPool.Put(&extra)
+	p.extra = nil
 }
 
 type directPathState struct {
@@ -151,6 +171,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 		return err
 	}
 	currentPath := directPathState{}
+	defer currentPath.raw.releaseExtra()
 	for {
 		tok, err := dec.readToken()
 		if errors.Is(err, io.EOF) {
@@ -166,14 +187,20 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 			if path, ok := parseDirectHeaderPath(tok.Bytes, false); ok {
 				next, err := directTableRaw(dst, path)
 				if err != nil {
+					path.releaseExtra()
 					return err
 				}
 				current = next
 				currentInfo, err = directStructInfo(current)
 				if err != nil {
+					path.releaseExtra()
 					return err
 				}
-				currentPath = directPathState{raw: path, valid: true, arrayIndex: -1}
+				currentPath.raw.releaseExtra()
+				currentPath.raw = path
+				currentPath.valid = true
+				currentPath.text = nil
+				currentPath.arrayIndex = -1
 				continue
 			}
 			path, err := parseHeaderKey(tok.Bytes, false)
@@ -189,19 +216,29 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 			if err != nil {
 				return err
 			}
-			currentPath = directPathState{text: path, valid: true, arrayIndex: -1}
+			currentPath.raw.releaseExtra()
+			currentPath.raw = directRawPath{}
+			currentPath.text = path
+			currentPath.valid = true
+			currentPath.arrayIndex = -1
 		case TokenKindArrayTableHeader:
 			if path, ok := parseDirectHeaderPath(tok.Bytes, true); ok {
 				next, index, err := directArrayTableRaw(dst, path, data, tok.Bytes)
 				if err != nil {
+					path.releaseExtra()
 					return err
 				}
 				current = next
 				currentInfo, err = directStructInfo(current)
 				if err != nil {
+					path.releaseExtra()
 					return err
 				}
-				currentPath = directPathState{raw: path, valid: true, arrayIndex: index}
+				currentPath.raw.releaseExtra()
+				currentPath.raw = path
+				currentPath.valid = true
+				currentPath.text = nil
+				currentPath.arrayIndex = index
 				continue
 			}
 			path, err := parseHeaderKey(tok.Bytes, true)
@@ -217,7 +254,11 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 			if err != nil {
 				return err
 			}
-			currentPath = directPathState{text: path, valid: true, arrayIndex: index}
+			currentPath.raw.releaseExtra()
+			currentPath.raw = directRawPath{}
+			currentPath.text = path
+			currentPath.valid = true
+			currentPath.arrayIndex = index
 		case TokenKindKey:
 			if isSimpleBareKey(tok.Bytes) { //nolint:nestif // bare-key fast path with map/struct target resolution; cohesive.
 				target, ok, err := directAssignmentForKeyInfo(current, currentInfo, tok.Bytes)
@@ -236,27 +277,35 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 				continue
 			}
 			if path, ok := parseDirectRawPath(tok.Bytes); ok { //nolint:nestif // raw dotted-path destination resolution; cohesive.
-				dst, valueKind, ok, err := directDestinationRaw(current, path)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					if err := skipNextValue(dec); err != nil {
+				err = func() error {
+					defer path.releaseExtra()
+
+					dst, valueKind, ok, err := directDestinationRaw(current, path)
+					if err != nil {
 						return err
 					}
-					continue
-				}
-				if dst.IsValid() {
-					err = directBindRawFromDecoder(dec, dst, valueKind, path, cfg)
-				} else {
-					value, parseErr := parseNextValue(dec)
-					if parseErr != nil {
-						return parseErr
+					if !ok {
+						if err := skipNextValue(dec); err != nil {
+							return err
+						}
+						return nil
 					}
-					err = directAssignRaw(current, path, value, cfg)
-				}
+					if dst.IsValid() {
+						err = directBindRawFromDecoder(dec, dst, valueKind, path, cfg)
+					} else {
+						value, parseErr := parseNextValue(dec)
+						if parseErr != nil {
+							return parseErr
+						}
+						err = directAssignRaw(current, path, value, cfg)
+					}
+					if err != nil {
+						return bindErrorPath(err, currentPath.string())
+					}
+					return nil
+				}()
 				if err != nil {
-					return bindErrorPath(err, currentPath.string())
+					return err
 				}
 				continue
 			}
@@ -389,6 +438,9 @@ func (p *directRawPath) append(part []byte) {
 	if p.n < len(p.stack) {
 		p.stack[p.n] = part
 	} else {
+		if p.extra == nil {
+			p.acquireExtra()
+		}
 		p.extra = append(p.extra, part)
 	}
 	p.n++
