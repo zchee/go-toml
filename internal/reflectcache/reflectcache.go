@@ -36,6 +36,7 @@ type TypeInfo struct {
 	Type          reflect.Type
 	Fields        []Field
 	MarshalFields []Field
+	EncodeStruct  StructEncoder
 	// LowerNames holds strings.ToLower(Fields[i].Name), parallel to Fields, so
 	// the small-struct lookup fast path can match case-insensitive aliases
 	// without hashing the map or allocating a lowercased key per decoded field.
@@ -131,6 +132,9 @@ func build(t reflect.Type) (*TypeInfo, error) {
 	slices.SortFunc(info.MarshalFields, func(x, y Field) int {
 		return cmp.Compare(x.Name, y.Name)
 	})
+	if !info.HasDuplicateNames {
+		info.EncodeStruct = buildStructEncoder(info.MarshalFields)
+	}
 	return info, nil
 }
 

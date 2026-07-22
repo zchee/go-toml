@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zchee/go-toml/internal/reflectcache"
 )
 
 func TestFacadeUnmarshalScalarsTablesAndArrays(t *testing.T) {
@@ -332,6 +334,79 @@ func TestMarshalDirectCompatibilityDuplicateTagOverwrite(t *testing.T) {
 	const want = "name = \"second\"\n"
 	if got := string(body); got != want {
 		t.Fatalf("Marshal() output mismatch:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestMarshalPrecomputedStructEncoderMatchesFieldLoop(t *testing.T) {
+	t.Parallel()
+
+	type item struct {
+		Name string
+		Rank int
+	}
+	type nested struct {
+		Host string
+		Port int
+	}
+	type scalarConfig struct {
+		Name    string `toml:"name"`
+		Empty   string `toml:"empty,omitzero"`
+		Active  bool
+		Count   int64
+		ID      uint
+		Ratio   float64
+		When    time.Time
+		Date    LocalDate
+		Clock   LocalTime
+		Aliases []string
+		Nested  nested
+		Items   []item
+	}
+	type duplicateConfig struct {
+		First  string `toml:"name"`
+		Second string `toml:"name"`
+		Empty  string `toml:"name,omitzero"`
+	}
+	tests := map[string]any{
+		"scalars nested and arrays": scalarConfig{
+			Name:    "demo \"quoted\"",
+			Active:  true,
+			Count:   -42,
+			ID:      7,
+			Ratio:   math.Copysign(0, -1),
+			When:    time.Date(2026, 7, 23, 1, 2, 3, 4, time.UTC),
+			Date:    LocalDate{Year: 2026, Month: 7, Day: 23},
+			Clock:   LocalTime{Hour: 1, Minute: 2, Second: 3, hasSecond: true},
+			Aliases: []string{"alpha", "beta"},
+			Nested:  nested{Host: "localhost", Port: 8080},
+			Items:   []item{{Name: "first", Rank: 1}, {Name: "second", Rank: 2}},
+		},
+		"duplicate names": duplicateConfig{First: "first", Second: "second"},
+	}
+
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			before, err := Marshal(value)
+			if err != nil {
+				t.Fatalf("Marshal() precomputed error = %v", err)
+			}
+			v := indirectValue(reflect.ValueOf(value))
+			info, err := reflectcache.Lookup(v.Type())
+			if err != nil {
+				t.Fatalf("Lookup() error = %v", err)
+			}
+			oldStructEncoder := info.EncodeStruct
+			info.EncodeStruct = nil
+			t.Cleanup(func() { info.EncodeStruct = oldStructEncoder })
+
+			after, err := Marshal(value)
+			if err != nil {
+				t.Fatalf("Marshal() field loop error = %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("Marshal() output mismatch:\nprecomputed:\n%s\nfield loop:\n%s", before, after)
+			}
+		})
 	}
 }
 

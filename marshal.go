@@ -48,6 +48,11 @@ const (
 
 var stringKeysPool sync.Pool
 
+func init() {
+	reflectcache.EncodeFieldFallback = encodeReflectcacheField
+	reflectcache.EncodeTableFallback = encodeReflectcacheTable
+}
+
 type marshalEntry struct {
 	name  string
 	value reflect.Value
@@ -106,6 +111,13 @@ func encodeStructDocument(buf *bytes.Buffer, v reflect.Value, path []string) err
 		}
 		return encodeEntriesDocument(buf, entries, path)
 	}
+	if info.EncodeStruct != nil {
+		return info.EncodeStruct(buf, v, path)
+	}
+	return encodeStructDocumentFields(buf, v, info, path)
+}
+
+func encodeStructDocumentFields(buf *bytes.Buffer, v reflect.Value, info *reflectcache.TypeInfo, path []string) error {
 	var tables []marshalEntry
 	for _, field := range info.MarshalFields {
 		value, ok := marshalFieldValue(v, field)
@@ -145,6 +157,29 @@ func encodeStructDocument(buf *bytes.Buffer, v reflect.Value, path []string) err
 		}
 	}
 	return nil
+}
+
+func encodeReflectcacheField(buf *bytes.Buffer, key string, v reflect.Value, _ []string) error {
+	return writeKeyValue(buf, key, v)
+}
+
+func encodeReflectcacheTable(buf *bytes.Buffer, key string, v reflect.Value, path []string) error {
+	if isArrayOfTables(v) {
+		items := indirectValue(v)
+		nextPath := appendPath(path, key)
+		for i := range items.Len() {
+			buf.WriteByte('\n')
+			writeHeader(buf, nextPath, true)
+			if err := encodeDocument(buf, items.Index(i), nextPath); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	buf.WriteByte('\n')
+	nextPath := appendPath(path, key)
+	writeHeader(buf, nextPath, false)
+	return encodeDocument(buf, v, nextPath)
 }
 
 func encodeEntriesDocument(buf *bytes.Buffer, entries []marshalEntry, path []string) error {

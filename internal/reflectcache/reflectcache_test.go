@@ -15,9 +15,12 @@
 package reflectcache
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLookupCachesMetadataAndRejectsTypedOmitempty(t *testing.T) {
@@ -83,6 +86,9 @@ func TestLookupCachesFieldMetadata(t *testing.T) {
 	if got := []string{info.MarshalFields[0].Name, info.MarshalFields[1].Name}; got[0] != "Name" || got[1] != "zero" {
 		t.Fatalf("MarshalFields order = %v, want [Name zero]", got)
 	}
+	if info.EncodeStruct == nil {
+		t.Fatal("EncodeStruct = nil, want precomputed encoder")
+	}
 
 	again, err := Lookup(reflect.TypeFor[sample]())
 	if err != nil {
@@ -113,5 +119,87 @@ func TestLookupMarksDuplicateMarshalNames(t *testing.T) {
 	}
 	if info.MarshalFields[0].Name != "name" || info.MarshalFields[1].Name != "name" {
 		t.Fatalf("MarshalFields duplicate names = %#v", info.MarshalFields)
+	}
+	if info.EncodeStruct != nil {
+		t.Fatalf("EncodeStruct = %p, want nil for duplicate names", info.EncodeStruct)
+	}
+}
+
+func TestEncodeStruct_writesFastScalarsAndDelegatesFallbacks(t *testing.T) {
+	type nested struct{ Value string }
+	type sample struct {
+		Name    string `toml:"name"`
+		Empty   string `toml:"empty,omitzero"`
+		Active  bool   `toml:"active"`
+		Count   int64  `toml:"count"`
+		ID      uint   `toml:"id"`
+		Ratio   float64
+		When    time.Time
+		Child   nested `toml:"child"`
+		Aliases []string
+	}
+	info, err := Lookup(reflect.TypeFor[sample]())
+	if err != nil {
+		t.Fatalf("Lookup() error = %v", err)
+	}
+	if info.EncodeStruct == nil {
+		t.Fatal("EncodeStruct = nil, want precomputed encoder")
+	}
+
+	oldFieldFallback := EncodeFieldFallback
+	oldTableFallback := EncodeTableFallback
+	t.Cleanup(func() {
+		EncodeFieldFallback = oldFieldFallback
+		EncodeTableFallback = oldTableFallback
+	})
+	var fallbackFields []string
+	var fallbackTables []string
+	EncodeFieldFallback = func(buf *bytes.Buffer, key string, v reflect.Value, _ []string) error {
+		fallbackFields = append(fallbackFields, key)
+		buf.WriteString(key)
+		buf.WriteString(" = fallback\n")
+		return nil
+	}
+	EncodeTableFallback = func(_ *bytes.Buffer, key string, _ reflect.Value, _ []string) error {
+		fallbackTables = append(fallbackTables, key)
+		return nil
+	}
+
+	var buf bytes.Buffer
+	err = info.EncodeStruct(&buf, reflect.ValueOf(sample{
+		Name:    "alpha",
+		Active:  true,
+		Count:   -42,
+		ID:      9,
+		Ratio:   1000,
+		When:    time.Date(2026, 7, 23, 1, 2, 3, 0, time.UTC),
+		Child:   nested{Value: "table"},
+		Aliases: []string{"a", "b"},
+	}), nil)
+	if err != nil {
+		t.Fatalf("EncodeStruct() error = %v", err)
+	}
+
+	got := buf.String()
+	for _, want := range []string{
+		"Ratio = 1000.0",
+		"When = 2026-07-23T01:02:03Z",
+		"active = true",
+		"count = -42",
+		"id = 9",
+		"name = \"alpha\"",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("EncodeStruct() missing %q\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "empty") {
+		t.Fatalf("EncodeStruct() included omitzero field\n%s", got)
+	}
+	if got, want := strings.Join(fallbackFields, ","), "Aliases"; got != want {
+		t.Fatalf("field fallbacks = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(fallbackTables, ","), "child"; got != want {
+		t.Fatalf("table fallbacks = %q, want %q", got, want)
 	}
 }
