@@ -27,8 +27,10 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/zchee/go-toml/internal/reflectcache"
+	"github.com/zchee/go-toml/internal/scan"
 )
 
 var (
@@ -694,19 +696,25 @@ func writeQuotedString(buf *bytes.Buffer, s string) error {
 }
 
 func asciiQuoteEscapeIndex(s string) int {
-	first := -1
-	for i := range len(s) {
-		c := s[i]
-		switch {
-		case c < 0x20 || c >= 0x7f:
-			return quoteFallback
-		case c == '"' || c == '\\':
-			if first < 0 {
-				first = i
-			}
-		}
+	if len(s) == 0 {
+		return -1
 	}
-	return first
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	// ScanBasicStringEscape does not flag DEL, which TOML text escaping
+	// () requires falling back for.
+	if bytes.IndexByte(b, 0x7f) >= 0 {
+		return quoteFallback
+	}
+	i := scan.ScanBasicStringEscape(b)
+	if i == len(s) {
+		return -1
+	}
+	switch s[i] {
+	case '"', '\\':
+		return i
+	default:
+		return quoteFallback
+	}
 }
 
 // appendBasicString appends s quoted as a single-line TOML basic string.

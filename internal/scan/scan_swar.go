@@ -125,6 +125,7 @@ var bareKeyClass = func() (t [256]bool) {
 var (
 	scanBareIdent         = scanBareKeySWAR
 	scanBasicString       = scanBasicStringSWAR
+	scanBasicStringEscape = scanBasicStringEscapeSWAR
 	scanBasicStringStrict = scanBasicStringStrictSWAR
 	scanCommentBody       = scanCommentBodySWAR
 	scanBareValueEnd      = scanBareValueEndSWAR
@@ -169,6 +170,19 @@ func scanBasicStringSWAR(s []byte) int {
 		}
 	}
 	return len(s)
+}
+
+func scanBasicStringEscapeSWAR(s []byte) int {
+	i := 0
+	for i+8 <= len(s) {
+		w := loadu64(s, i)
+		m := hasByteEq(w, '"') | hasByteEq(w, '\\') | hasByteLessThan(w, 0x20) | (w & swarHighs)
+		if m != 0 {
+			return i + bits.TrailingZeros64(m)/8
+		}
+		i += 8
+	}
+	return i + scanBasicStringEscapeScalar(s[i:])
 }
 
 // scanBasicStringStrictSWAR is the SWAR implementation of

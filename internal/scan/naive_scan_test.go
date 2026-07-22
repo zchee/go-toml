@@ -58,6 +58,15 @@ func naiveScanBasicString(s []byte) int {
 	return len(s)
 }
 
+func naiveScanBasicStringEscape(s []byte) int {
+	for i, b := range s {
+		if basicStringEscapeStop(b) {
+			return i
+		}
+	}
+	return len(s)
+}
+
 // naiveScanBasicStringStrict is the byte-by-byte oracle for
 // ScanBasicStringStrict. It returns the first byte that needs slow-path
 // handling in a single-line TOML basic string: a double quote,

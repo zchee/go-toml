@@ -35,6 +35,7 @@ func TestDispatch_ARM64_NEON(t *testing.T) {
 		t,
 		scanBareKeyNEON,
 		scanBasicStringNEON,
+		scanBasicStringEscapeNEON,
 		scanBasicStringStrictNEON,
 		scanCommentBodyNEON,
 		scanBareValueEndNEON,

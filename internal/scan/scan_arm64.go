@@ -57,6 +57,7 @@ package scan
 var (
 	scanBareIdent         = scanBareKeyNEON
 	scanBasicString       = scanBasicStringNEON
+	scanBasicStringEscape = scanBasicStringEscapeNEON
 	scanBasicStringStrict = scanBasicStringStrictNEON
 	scanCommentBody       = scanCommentBodyNEON
 	scanBareValueEnd      = scanBareValueEndNEON
@@ -76,6 +77,9 @@ func scanBareKeyNEON(s []byte) int
 
 // scanBasicStringNEON is the NEON variant of ScanBasicString.
 func scanBasicStringNEON(s []byte) int
+
+// scanBasicStringEscapeNEON is the NEON variant of ScanBasicStringEscape.
+func scanBasicStringEscapeNEON(s []byte) int
 
 // scanLiteralStringNEON is the NEON variant of ScanLiteralString.
 func scanLiteralStringNEON(s []byte) int

@@ -123,6 +123,11 @@ func TestProperty_ScanBasicString(t *testing.T) {
 	runProperty(t, "ScanBasicString", ScanBasicString, naiveScanBasicString)
 }
 
+func TestProperty_ScanBasicStringEscape(t *testing.T) {
+	t.Parallel()
+	runProperty(t, "ScanBasicStringEscape", ScanBasicStringEscape, naiveScanBasicStringEscape)
+}
+
 func TestProperty_ScanBasicStringStrict(t *testing.T) {
 	t.Parallel()
 	runProperty(t, "ScanBasicStringStrict", ScanBasicStringStrict, naiveScanBasicStringStrict)

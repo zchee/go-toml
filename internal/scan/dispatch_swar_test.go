@@ -35,6 +35,7 @@ func TestDispatch_SWAR(t *testing.T) {
 		t,
 		scanBareKeySWAR,
 		scanBasicStringSWAR,
+		scanBasicStringEscapeSWAR,
 		scanBasicStringStrictSWAR,
 		scanCommentBodySWAR,
 		scanBareValueEndSWAR,

@@ -13,6 +13,7 @@ and perf-gate benchmark pairs.
 | Public internal API | `api.go` | Sentinel contracts and `LimitError`. |
 | Package contract | `doc.go`, `README.md` | Build matrix, maintenance contract, perf table. |
 | Scalar helpers/oracles | `strict.go`, `naive_scan_test.go` | Single source for class predicates. |
+| Basic string escape scan | `api.go`, `scan_*.go`, `marshal.go` | `ScanBasicStringEscape` finds marshal escape/fallback bytes. |
 | amd64 backend | `scan_amd64.go`, `scan_amd64_single_byte.s` | SSE2 default, AVX2 via `archsimd.X86.AVX2()`. |
 | arm64 backend | `scan_arm64.go`, `scan_arm64.s` | NEON, no runtime feature detect. |
 | SWAR backend | `scan_swar.go`, `scan_force_swar.go` | Pure Go fallback and forced verification. |

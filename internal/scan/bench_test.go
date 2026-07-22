@@ -174,6 +174,19 @@ func makeScanBasicStringBuf() []byte {
 	return buf
 }
 
+func makeScanBasicStringEscapeBuf() []byte {
+	r := newBenchRand("ScanBasicStringEscape")
+	buf := make([]byte, benchBufSize)
+	for i := range buf {
+		b := byte(r.UintN(95)) + 32
+		if b == '"' || b == '\\' {
+			b = 'x'
+		}
+		buf[i] = b
+	}
+	return buf
+}
+
 // makeScanBasicStringStrictBuf returns a 64 KiB buffer of single-line
 // TOML basic-string body bytes that do not require slow-path handling.
 // It includes printable ASCII, spaces, and tabs, while excluding quote,
@@ -370,6 +383,16 @@ func BenchmarkScanBasicString_SIMD(b *testing.B) {
 	}
 }
 
+func BenchmarkScanBasicStringEscape_SIMD(b *testing.B) {
+	buf := makeScanBasicStringEscapeBuf()
+	b.SetBytes(int64(len(buf)))
+	_ = ScanBasicStringEscape(buf)
+
+	for b.Loop() {
+		_ = ScanBasicStringEscape(buf)
+	}
+}
+
 func BenchmarkScanBasicStringStrict_SIMD(b *testing.B) {
 	buf := makeScanBasicStringStrictBuf()
 	b.SetBytes(int64(len(buf)))
@@ -472,6 +495,16 @@ func BenchmarkScanBasicString_Baseline(b *testing.B) {
 
 	for b.Loop() {
 		_ = naiveScanBasicString(buf)
+	}
+}
+
+func BenchmarkScanBasicStringEscape_Baseline(b *testing.B) {
+	buf := makeScanBasicStringEscapeBuf()
+	b.SetBytes(int64(len(buf)))
+	_ = naiveScanBasicStringEscape(buf)
+
+	for b.Loop() {
+		_ = naiveScanBasicStringEscape(buf)
 	}
 }
 

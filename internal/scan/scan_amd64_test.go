@@ -50,6 +50,7 @@ func amd64Variants() []amd64Variant {
 	return []amd64Variant{
 		{"SSE2_ScanBareKey", scanBareKeySSE2, naiveScanBareKey, false},
 		{"SSE2_ScanBasicString", scanBasicStringSSE2, naiveScanBasicString, false},
+		{"SSE2_ScanBasicStringEscape", scanBasicStringEscapeSSE2, naiveScanBasicStringEscape, false},
 		{"SSE2_ScanBasicStringStrict", scanBasicStringStrictSSE2, naiveScanBasicStringStrict, false},
 		{"SSE2_ScanCommentBody", scanCommentBodySSE2, naiveScanCommentBody, false},
 		{"SSE2_ScanBareValueEnd", scanBareValueEndSSE2, naiveScanBareValueEnd, false},
@@ -60,6 +61,7 @@ func amd64Variants() []amd64Variant {
 		{"SSE2_ValidateUTF8", validateUTF8SSE2, naiveValidateUTF8, false},
 		{"AVX2_ScanBareKey", scanBareKeyAVX2, naiveScanBareKey, true},
 		{"AVX2_ScanBasicString", scanBasicStringAVX2, naiveScanBasicString, true},
+		{"AVX2_ScanBasicStringEscape", scanBasicStringEscapeAVX2, naiveScanBasicStringEscape, true},
 		{"AVX2_ScanBasicStringStrict", scanBasicStringStrictAVX2, naiveScanBasicStringStrict, true},
 		{"AVX2_ScanCommentBody", scanCommentBodyAVX2, naiveScanCommentBody, true},
 		{"AVX2_ScanBareValueEnd", scanBareValueEndAVX2, naiveScanBareValueEnd, true},
@@ -238,6 +240,8 @@ func TestAMD64Variants_Golden(t *testing.T) {
 				want, ok := g.want[scan]
 				if !ok {
 					switch scan {
+					case "ScanBasicStringEscape":
+						want = naiveScanBasicStringEscape(g.input)
 					case "ScanBasicStringStrict":
 						want = naiveScanBasicStringStrict(g.input)
 					case "ScanCommentBody":

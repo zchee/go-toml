@@ -17,6 +17,7 @@ return `len(s)` for "not found" or "all bytes accepted".
 | --- | --- | --- |
 | `ScanBareKey` | Count of the leading `[A-Za-z0-9_-]` bytes; `len(s)` when all bytes match. | Scans bare key segments. |
 | `ScanBasicString` | Index of the first `"` or `\`; `len(s)` when neither byte appears. | Finds the next basic-string terminator or escape introducer. |
+| `ScanBasicStringEscape` | Index of the first `"`, `\`, C0 control, or non-ASCII byte; `len(s)` when absent. | Finds marshal basic-string escape/fallback boundaries. |
 | `ScanBasicStringStrict` | Index of the first `"`, `\`, DEL, or C0 control other than tab; `len(s)` when absent. | Fuses single-line basic-string delimiter and control validation. |
 | `ScanCommentBody` | Index of the first LF, CR, DEL, or C0 control other than tab; `len(s)` when absent. | Scans bytes after a leading `#` while preserving parser-owned CRLF semantics. |
 | `ScanBareValueEnd` | Index of the first raw bare-value delimiter; `len(s)` when absent. | Finds raw value token boundaries before parser-level datetime-space joining. |

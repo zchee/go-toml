@@ -87,6 +87,7 @@ import (
 var (
 	scanBareIdent         = scanBareKeySSE2
 	scanBasicString       = scanBasicStringSSE2
+	scanBasicStringEscape = scanBasicStringEscapeSSE2
 	scanBasicStringStrict = scanBasicStringStrictSSE2
 	scanCommentBody       = scanCommentBodySSE2
 	scanBareValueEnd      = scanBareValueEndSSE2
@@ -113,6 +114,7 @@ func init() {
 	if archsimd.X86.AVX2() {
 		scanBareIdent = scanBareKeyAVX2
 		scanBasicString = scanBasicStringAVX2
+		scanBasicStringEscape = scanBasicStringEscapeAVX2
 		scanBasicStringStrict = scanBasicStringStrictAVX2
 		scanCommentBody = scanCommentBodyAVX2
 		scanBareValueEnd = scanBareValueEndAVX2
@@ -166,6 +168,23 @@ func scanBasicStringAVX2(s []byte) int {
 		i += 32
 	}
 	return i + scanBasicStringSSE2(s[i:])
+}
+
+func scanBasicStringEscapeAVX2(s []byte) int {
+	i := 0
+	quote := archsimd.BroadcastUint8x32('"')
+	bksl := archsimd.BroadcastUint8x32('\\')
+	control := archsimd.BroadcastUint8x32(0x1f)
+	high := archsimd.BroadcastUint8x32(0x80)
+	for i+32 <= len(s) {
+		v := archsimd.LoadUint8x32Slice(s[i:])
+		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.LessEqual(control)).Or(v.GreaterEqual(high))
+		if b := m.ToBits(); b != 0 {
+			return i + bits.TrailingZeros32(b)
+		}
+		i += 32
+	}
+	return i + scanBasicStringEscapeSSE2(s[i:])
 }
 
 func scanBasicStringStrictAVX2(s []byte) int {
@@ -347,6 +366,23 @@ func scanBasicStringSSE2(s []byte) int {
 		}
 	}
 	return len(s)
+}
+
+func scanBasicStringEscapeSSE2(s []byte) int {
+	i := 0
+	quote := archsimd.BroadcastUint8x16('"')
+	bksl := archsimd.BroadcastUint8x16('\\')
+	control := archsimd.BroadcastUint8x16(0x1f)
+	high := archsimd.BroadcastUint8x16(0x80)
+	for i+16 <= len(s) {
+		v := archsimd.LoadUint8x16Slice(s[i:])
+		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.LessEqual(control)).Or(v.GreaterEqual(high))
+		if b := m.ToBits(); b != 0 {
+			return i + bits.TrailingZeros16(b)
+		}
+		i += 16
+	}
+	return i + scanBasicStringEscapeScalar(s[i:])
 }
 
 func scanBasicStringStrictSSE2(s []byte) int {

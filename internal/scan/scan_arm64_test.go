@@ -47,6 +47,7 @@ func arm64Variants() []arm64Variant {
 	return []arm64Variant{
 		{"NEON_ScanBareKey", scanBareKeyNEON, naiveScanBareKey},
 		{"NEON_ScanBasicString", scanBasicStringNEON, naiveScanBasicString},
+		{"NEON_ScanBasicStringEscape", scanBasicStringEscapeNEON, naiveScanBasicStringEscape},
 		{"NEON_ScanBasicStringStrict", scanBasicStringStrictNEON, naiveScanBasicStringStrict},
 		{"NEON_ScanCommentBody", scanCommentBodyNEON, naiveScanCommentBody},
 		{"NEON_ScanBareValueEnd", scanBareValueEndNEON, naiveScanBareValueEnd},
@@ -307,6 +308,8 @@ func TestARM64Variants_Golden(t *testing.T) {
 				want, ok := g.want[scan]
 				if !ok {
 					switch scan {
+					case "ScanBasicStringEscape":
+						want = naiveScanBasicStringEscape(g.input)
 					case "ScanBasicStringStrict":
 						want = naiveScanBasicStringStrict(g.input)
 					case "ScanCommentBody":

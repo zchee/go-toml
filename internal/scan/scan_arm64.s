@@ -255,6 +255,104 @@ bstr_match:
 	RET
 
 // ============================================================================
+// scanBasicStringEscapeNEON — first byte requiring marshal escape/fallback.
+// Stops at '"', '\\', C0 control (<0x20), or non-ASCII (>=0x80); returns
+// len(s) on miss.
+// ============================================================================
+
+// func scanBasicStringEscapeNEON(s []byte) int
+TEXT ·scanBasicStringEscapeNEON(SB), NOSPLIT, $0-32
+	MOVD s_base+0(FP), R0
+	MOVD s_len+8(FP), R1
+	MOVD R0, R11
+
+	CBZ R1, besc_drained
+
+	MOVD $0x40100401, R5
+	VMOV R5, V5.S4
+	MOVD $'"', R3
+	VMOV R3, V0.B16
+	MOVD $'\\', R3
+	VMOV R3, V7.B16
+	MOVD $0x80, R3
+	VMOV R3, V8.B16
+	VEOR V14.B16, V14.B16, V14.B16
+
+besc_loop32:
+	CMP    $32, R1
+	BLT    besc_tail
+	VLD1.P (R0), [V1.B16, V2.B16]
+	SUB    $32, R1, R1
+
+	VCMEQ V0.B16, V1.B16, V3.B16
+	VCMEQ V7.B16, V1.B16, V6.B16
+	VORR  V6.B16, V3.B16, V3.B16
+	VUSHR $5, V1.B16, V12.B16
+	VCMEQ V14.B16, V12.B16, V12.B16
+	VORR  V12.B16, V3.B16, V3.B16
+	VAND  V8.B16, V1.B16, V12.B16
+	VCMEQ V8.B16, V12.B16, V12.B16
+	VORR  V12.B16, V3.B16, V3.B16
+
+	VCMEQ V0.B16, V2.B16, V4.B16
+	VCMEQ V7.B16, V2.B16, V6.B16
+	VORR  V6.B16, V4.B16, V4.B16
+	VUSHR $5, V2.B16, V12.B16
+	VCMEQ V14.B16, V12.B16, V12.B16
+	VORR  V12.B16, V4.B16, V4.B16
+	VAND  V8.B16, V2.B16, V12.B16
+	VCMEQ V8.B16, V12.B16, V12.B16
+	VORR  V12.B16, V4.B16, V4.B16
+
+	VORR  V4.B16, V3.B16, V6.B16
+	VADDP V6.D2, V6.D2, V6.D2
+	VMOV  V6.D[0], R6
+	CBNZ  R6, besc_construct
+	CBNZ  R1, besc_loop32
+	B     besc_drained
+
+besc_construct:
+	VAND  V5.B16, V3.B16, V3.B16
+	VAND  V5.B16, V4.B16, V4.B16
+	VADDP V4.B16, V3.B16, V6.B16
+	VADDP V6.B16, V6.B16, V6.B16
+	VMOV  V6.D[0], R6
+	RBIT  R6, R6
+	CLZ   R6, R6
+	SUB   $32, R0, R0
+	ADD   R6>>1, R0, R0
+	SUB   R11, R0, R0
+	MOVD  R0, ret+24(FP)
+	RET
+
+besc_tail:
+	CBZ R1, besc_drained
+
+besc_tail_loop:
+	MOVBU.P 1(R0), R3
+	CMP     $'"', R3
+	BEQ     besc_tail_match
+	CMP     $'\\', R3
+	BEQ     besc_tail_match
+	CMP     $0x20, R3
+	BLO     besc_tail_match
+	CMP     $0x80, R3
+	BHS     besc_tail_match
+	SUBS    $1, R1, R1
+	BNE     besc_tail_loop
+
+besc_drained:
+	SUB  R11, R0, R0
+	MOVD R0, ret+24(FP)
+	RET
+
+besc_tail_match:
+	SUB  $1, R0, R0
+	SUB  R11, R0, R0
+	MOVD R0, ret+24(FP)
+	RET
+
+// ============================================================================
 // scanLiteralStringNEON — first index of single-quote (0x27), or len(s).
 //
 // T3.1 rewrite (perf): mirrors stdlib internal/bytealg/indexbyte_arm64.s as

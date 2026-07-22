@@ -60,6 +60,12 @@ func ScanBareKey(s []byte) int { return scanBareIdent(s) } //nolint:revive // de
 // the two terminator bytes was found.
 func ScanBasicString(s []byte) int { return scanBasicString(s) } //nolint:revive // deliberate Scan* scanner-kernel family naming (see doc.go); internal pkg, renaming ripples across documented oracle/property tests.
 
+// ScanBasicStringEscape returns the byte index of the first byte that
+// requires TOML basic-string escaping or fallback quoting: a double quote,
+// a backslash, any C0 control byte below 0x20, or any non-ASCII byte
+// >= 0x80. It returns len(s) when every byte is plain ASCII body text.
+func ScanBasicStringEscape(s []byte) int { return scanBasicStringEscape(s) } //nolint:revive // deliberate Scan* scanner-kernel family naming (see doc.go); internal pkg, renaming ripples across documented oracle/property tests.
+
 // ScanBasicStringStrict returns the byte index of the first byte that
 // needs slow-path handling in a single-line TOML basic string: a double
 // quote, a backslash, DEL (0x7f), or a C0 control byte below 0x20 other

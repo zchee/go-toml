@@ -18,6 +18,20 @@ func basicStringStrictStop(b byte) bool {
 	return b == '"' || b == '\\' || b == 0x7f || (b < 0x20 && b != '\t')
 }
 
+func basicStringEscapeStop(b byte) bool {
+	return b == '"' || b == '\\' || b < 0x20 || b >= 0x80
+}
+
+//nolint:unused // called by scan_amd64.go/scan_swar.go tails; unused only on the arm64 build the linter analyzes.
+func scanBasicStringEscapeScalar(s []byte) int {
+	for i, b := range s {
+		if basicStringEscapeStop(b) {
+			return i
+		}
+	}
+	return len(s)
+}
+
 //nolint:unused // called by scan_amd64.go/scan_swar.go tails; unused only on the arm64 build the linter analyzes.
 func scanBasicStringStrictScalar(s []byte) int {
 	for i, b := range s {

@@ -176,6 +176,26 @@ func FuzzScanBasicString(f *testing.F) {
 	})
 }
 
+func FuzzScanBasicStringEscape(f *testing.F) {
+	addBoundarySeeds(f, 'x', '"')
+	for _, terminator := range []byte{'\\', '\n', '\r', 0x00, 0x1f, 0x80, 0xff} {
+		for _, n := range []int{8, 16, 32, 64} {
+			b := []byte(strings.Repeat("x", n))
+			b[n-1] = terminator
+			f.Add(b)
+		}
+	}
+	f.Add([]byte("space and tab\tstay ascii"))
+	f.Add(append([]byte("unicode "), []byte("é")...))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		got := ScanBasicStringEscape(data)
+		want := naiveScanBasicStringEscape(data)
+		if got != want {
+			t.Errorf("ScanBasicStringEscape(%x) = %d, want %d", data, got, want)
+		}
+	})
+}
+
 // FuzzScanBasicStringStrict explores inputs for the fused single-line
 // basic-string scan. It shares the quote/backslash terminator coverage
 // with FuzzScanBasicString and adds explicit boundary controls for the

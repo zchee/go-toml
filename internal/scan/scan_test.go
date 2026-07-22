@@ -95,6 +95,39 @@ func TestScanBasicString(t *testing.T) {
 	}
 }
 
+func TestScanBasicStringEscape(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		input []byte
+		want  int
+	}{
+		"success:empty":                  {[]byte(""), 0},
+		"success:no_escape":              {[]byte("hello world"), 11},
+		"success:quote_at_0":             {[]byte("\"foo"), 0},
+		"success:backslash_at_0":         {[]byte("\\nfoo"), 0},
+		"success:quote_at_8":             {[]byte("abcdefgh\""), 8},
+		"success:backslash_at_9":         {[]byte("abcdefghi\\"), 9},
+		"success:nul_control":            {append([]byte("abc"), 0x00), 3},
+		"success:unit_separator_control": {append([]byte("abc"), 0x1f), 3},
+		"success:space_is_body_text":     {[]byte("abc def"), 7},
+		"success:del_is_body_text":       {append([]byte("abc"), 0x7f), 4},
+		"success:high_bit_at_0":          {[]byte{0x80, 'a'}, 0},
+		"success:high_bit_after_ascii":   {append([]byte("abc"), 0x80), 3},
+		"success:long_then_high_bit":     {append([]byte(strings.Repeat("x", 100)), 0x80), 100},
+		"success:long_no_escape":         {[]byte(strings.Repeat("x", 100)), 100},
+		"success:control_before_quote":   {[]byte{'a', 'b', 0x01, '"'}, 2},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := ScanBasicStringEscape(tc.input)
+			if got != tc.want {
+				t.Errorf("ScanBasicStringEscape(%q) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestScanBasicStringStrict(t *testing.T) {
 	t.Parallel()
 	tests := map[string]struct {
