@@ -179,7 +179,7 @@ func TestAddTagPreservesSignedNaN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addTag() error = %v", err)
 	}
-	got, err := json.Marshal(tagged)
+	got, err := json.Marshal(tagged, json.Deterministic(true))
 	if err != nil {
 		t.Fatalf("json.Marshal(addTag()) error = %v", err)
 	}
