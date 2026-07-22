@@ -199,10 +199,7 @@ func isTableLike(v reflect.Value) bool {
 	if !v.IsValid() || isScalarSpecialType(v.Type()) {
 		return false
 	}
-	if isArrayOfTables(v) {
-		return true
-	}
-	return v.Kind() == reflect.Struct || v.Kind() == reflect.Map
+	return isArrayOfTables(v) || v.Kind() == reflect.Struct || v.Kind() == reflect.Map
 }
 
 func isArrayOfTables(v reflect.Value) bool {
@@ -225,10 +222,9 @@ func indirectValue(v reflect.Value) reflect.Value {
 }
 
 func isScalarSpecialType(t reflect.Type) bool {
-	if t == reflect.TypeFor[time.Time]() || isTomlLocalDateType(t) {
-		return true
-	}
-	return t.PkgPath() != "" && t.Implements(reflect.TypeFor[encoding.TextMarshaler]())
+	return t == reflect.TypeFor[time.Time]() ||
+		isTomlLocalDateType(t) ||
+		(t.PkgPath() != "" && t.Implements(reflect.TypeFor[encoding.TextMarshaler]()))
 }
 
 func isTomlLocalDateType(t reflect.Type) bool {

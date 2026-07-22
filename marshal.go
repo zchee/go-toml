@@ -700,8 +700,8 @@ func asciiQuoteEscapeIndex(s string) int {
 		return -1
 	}
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
-	// ScanBasicStringEscape does not flag DEL, which TOML text escaping
-	// () requires falling back for.
+	// ScanBasicStringEscape does not flag DEL (0x7f), which must also
+	// take the escape fallback path.
 	if bytes.IndexByte(b, 0x7f) >= 0 {
 		return quoteFallback
 	}

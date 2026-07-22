@@ -126,10 +126,6 @@ func init() {
 	}
 }
 
-// =====================================================================
-// AVX2 variants (32-byte stride)
-// =====================================================================
-
 func scanBareKeyAVX2(s []byte) int {
 	i := 0
 	upA := archsimd.BroadcastUint8x32('A')
@@ -306,11 +302,6 @@ func validateUTF8ASCIIAVX2(s []byte) int {
 	}
 	return i + validateUTF8ASCIISSE2(s[i:])
 }
-
-// =====================================================================
-// SSE2 variants (16-byte stride). Each finishes its tail with an inline
-// scalar loop; the AVX2 variants call these for their <32-byte tail.
-// =====================================================================
 
 func scanBareKeySSE2(s []byte) int {
 	i := 0

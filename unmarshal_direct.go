@@ -1220,7 +1220,7 @@ func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 	case reflect.Slice:
 		out := reflect.MakeSlice(dst.Type(), 0, 0)
 		for i := 0; ; i++ {
-			tok, err := directNextArrayValueToken(dec)
+			tok, err := directNextValueToken(dec)
 			if err != nil {
 				return err
 			}
@@ -1236,7 +1236,7 @@ func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		}
 	case reflect.Array:
 		for i := 0; ; i++ {
-			tok, err := directNextArrayValueToken(dec)
+			tok, err := directNextValueToken(dec)
 			if err != nil {
 				return err
 			}
@@ -1255,19 +1255,6 @@ func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		}
 	default:
 		return mismatch(dst.Type(), []any{})
-	}
-}
-
-func directNextArrayValueToken(dec *Decoder) (rawToken, error) {
-	for {
-		tok, err := dec.readToken()
-		if err != nil {
-			return rawToken{}, err
-		}
-		if tok.Kind == TokenKindComment {
-			continue
-		}
-		return tok, nil
 	}
 }
 

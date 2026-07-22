@@ -121,13 +121,6 @@ func build(t reflect.Type) (*TypeInfo, error) {
 		info.Fields = append(info.Fields, field)
 		info.LowerNames = append(info.LowerNames, lower)
 	}
-	for i, field := range info.Fields {
-		lower := strings.ToLower(field.Name)
-		if _, exists := info.ByName[lower]; !exists {
-			info.ByName[lower] = field
-			info.ByNameIndex[lower] = int32(i)
-		}
-	}
 	info.MarshalFields = slices.Clone(info.Fields)
 	slices.SortFunc(info.MarshalFields, func(x, y Field) int {
 		return cmp.Compare(x.Name, y.Name)

@@ -68,10 +68,6 @@ var (
 	validateUTF8          = validateUTF8NEON
 )
 
-// =====================================================================
-// Assembly entry points (implemented in scan_arm64.s).
-// =====================================================================
-
 // scanBareKeyNEON is the NEON variant of ScanBareKey.
 func scanBareKeyNEON(s []byte) int
 
@@ -108,10 +104,6 @@ func locateNewlineNEON(s []byte) int
 // pure ASCII. Implemented in scan_arm64.s with a 32-byte NEON stride
 // and a per-byte tail.
 func validateUTF8NEONBulk(s []byte) int
-
-// =====================================================================
-// Go-side wrappers / scalar continuations.
-// =====================================================================
 
 // validateUTF8NEON wraps validateUTF8NEONBulk with a Go scalar
 // continuation that uses unicode/utf8.DecodeRune to validate multi-byte
