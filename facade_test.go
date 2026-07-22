@@ -873,12 +873,15 @@ func TestMarshalASCIIQuoteEscapeIndex(t *testing.T) {
 		input string
 		want  int
 	}{
-		"success: plain ascii":      {input: "plain-ascii_123", want: -1},
-		"success: quote":            {input: `needs"quote`, want: 5},
-		"success: backslash":        {input: `needs\\slash`, want: 5},
-		"success: control fallback": {input: "line\n", want: quoteFallback},
-		"success: delete fallback":  {input: "del\x7f", want: quoteFallback},
-		"success: unicode fallback": {input: "snowman ☃", want: quoteFallback},
+		"success: plain ascii":            {input: "plain-ascii_123", want: -1},
+		"success: quote":                  {input: `needs"quote`, want: 5},
+		"success: backslash":              {input: `needs\\slash`, want: 5},
+		"success: control fallback":       {input: "line\n", want: quoteFallback},
+		"success: delete fallback":        {input: "del\x7f", want: quoteFallback},
+		"success: unicode fallback":       {input: "snowman ☃", want: quoteFallback},
+		"success: quote then control":     {input: "needs\"quote\n", want: quoteFallback},
+		"success: quote then unicode":     {input: "needs\"quote ☃", want: quoteFallback},
+		"success: backslash then control": {input: "needs\\slash\n", want: quoteFallback},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

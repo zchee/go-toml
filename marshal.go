@@ -91,9 +91,6 @@ func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
 		putMarshalBuffer(buf)
 		return nil, err
 	}
-	if buf.Len() > maxMarshalSizeHint {
-		return buf.Bytes(), nil
-	}
 	out := append([]byte(nil), buf.Bytes()...)
 	putMarshalBuffer(buf)
 	return out, nil
@@ -705,16 +702,23 @@ func asciiQuoteEscapeIndex(s string) int {
 	if bytes.IndexByte(b, 0x7f) >= 0 {
 		return quoteFallback
 	}
-	i := scan.ScanBasicStringEscape(b)
-	if i == len(s) {
-		return -1
+	first := -1
+	for off := 0; off < len(b); {
+		n := scan.ScanBasicStringEscape(b[off:])
+		if n == len(b[off:]) {
+			break
+		}
+		idx := off + n
+		c := b[idx]
+		if c < 0x20 || c >= 0x80 {
+			return quoteFallback
+		}
+		if first < 0 {
+			first = idx
+		}
+		off = idx + 1
 	}
-	switch s[i] {
-	case '"', '\\':
-		return i
-	default:
-		return quoteFallback
-	}
+	return first
 }
 
 // appendBasicString appends s quoted as a single-line TOML basic string.
