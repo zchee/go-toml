@@ -196,7 +196,14 @@ func NewDecoder(r io.Reader, opts ...Option) *Decoder {
 
 // NewDecoderBytes creates a Decoder over an in-memory TOML payload.
 func NewDecoderBytes(data []byte, opts ...Option) *Decoder {
-	d := &Decoder{
+	d := &Decoder{}
+	initDecoderBytes(d, data, opts...)
+	return d
+}
+
+// initDecoderBytes initializes d over data. d must be non-nil and zero or reusable.
+func initDecoderBytes(d *Decoder, data []byte, opts ...Option) {
+	*d = Decoder{
 		off:                 0,
 		line:                1,
 		col:                 1,
@@ -215,15 +222,14 @@ func NewDecoderBytes(data []byte, opts ...Option) *Decoder {
 	}
 	if d.limits.MaxDocumentSize > 0 && len(d.buf) > d.limits.MaxDocumentSize {
 		d.err = &LimitError{Limit: "MaxDocumentSize", Value: d.limits.MaxDocumentSize, Span: [2]int{0, d.limits.MaxDocumentSize}}
-		return d
+		return
 	}
 	if bad := scan.ValidateUTF8(d.buf); bad != len(d.buf) {
 		d.err = &SyntaxError{Line: 1, Col: bad + 1, Msg: "invalid utf-8", Span: [2]int{bad, bad + 1}}
-		return d
+		return
 	}
 	d.skipBOM()
 	d.decodeStart = d.off
-	return d
 }
 
 // Decode decodes the decoder's TOML document into dst.
@@ -549,7 +555,7 @@ func (d *Decoder) scanValueToken() (rawToken, error) {
 	ch := d.buf[start]
 	switch ch {
 	case '"', '\'':
-		end, kind, err := d.scanString(start)
+		end, kind, flags, err := d.scanString(start)
 		if err != nil {
 			return rawToken{}, err
 		}
@@ -559,7 +565,7 @@ func (d *Decoder) scanValueToken() (rawToken, error) {
 			d.setErr(err)
 			return rawToken{}, err
 		}
-		tok := d.makeToken(kind, chunk, start, tokenScalar{})
+		tok := d.makeTokenFlags(kind, chunk, start, tokenScalar{}, flags)
 		d.advanceBytes(chunk)
 		d.expectingValue = false
 		d.valueNoNewline = false
@@ -826,9 +832,10 @@ func (d *Decoder) scanQuoted(quote byte, off int) (int, error) {
 }
 
 //nolint:cyclop,funlen,gocognit // multiline/single-line string terminator scan; cohesive escape state machine.
-func (d *Decoder) scanString(off int) (int, TokenKind, error) {
+func (d *Decoder) scanString(off int) (int, TokenKind, tokenFlags, error) {
 	rest := d.buf[off:]
 	if hasBytePrefix(rest, '"', '"', '"') { //nolint:nestif // multiline basic-string terminator scan; cohesive.
+		escapeFree := true
 		for end := off + 3; end < len(d.buf); {
 			n := scan.ScanBasicString(d.buf[end:])
 			end += n
@@ -838,24 +845,29 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 			switch d.buf[end] {
 			case '\\':
 				if end+1 >= len(d.buf) {
-					return 0, TokenKindInvalid, d.syntaxError("unterminated string escape", end)
+					return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string escape", end)
 				}
+				escapeFree = false
 				end += 2
 			case '"':
 				run := countByteRun(d.buf[end:], '"')
 				if run >= 3 {
 					tokenEnd := end + min(run, 5)
 					if err := validateStringValue(d.buf[off:tokenEnd]); err != nil {
-						return 0, TokenKindInvalid, err
+						return 0, TokenKindInvalid, 0, err
 					}
-					return tokenEnd, TokenKindValueString, nil
+					var flags tokenFlags
+					if escapeFree {
+						flags = tokenFlagStringBodyOK
+					}
+					return tokenEnd, TokenKindValueString, flags, nil
 				}
 				end += run
 			default:
 				end++
 			}
 		}
-		return 0, TokenKindInvalid, d.syntaxError("unterminated multiline string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated multiline string", off)
 	}
 	if hasBytePrefix(rest, '\'', '\'', '\'') { //nolint:nestif // multiline literal-string terminator scan; cohesive.
 		for end := off + 3; end < len(d.buf); {
@@ -868,23 +880,19 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 			if run >= 3 {
 				tokenEnd := end + min(run, 5)
 				if err := validateStringValue(d.buf[off:tokenEnd]); err != nil {
-					return 0, TokenKindInvalid, err
+					return 0, TokenKindInvalid, 0, err
 				}
-				return tokenEnd, TokenKindValueString, nil
+				return tokenEnd, TokenKindValueString, tokenFlagStringBodyOK, nil
 			}
 			end += run
 		}
-		return 0, TokenKindInvalid, d.syntaxError("unterminated multiline string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated multiline string", off)
 	}
 	quote := d.buf[off]
 	if quote == '"' {
-		// escapeFree tracks whether the body contains no backslash escape. The
-		// ScanBasicStringStrict kernel only advances over bytes that are valid
-		// unescaped basic-string content (it stops at control bytes, which the
-		// default branch reports), so if the closing quote is reached without
-		// ever taking the '\\' branch, the whole body is already proven valid
-		// and the validateStringValue re-scan below is redundant. Escaped
-		// strings still need validation to check escape-sequence correctness.
+		// escapeFree: ScanBasicStringStrict only advances over valid unescaped
+		// basic-string content. Closing quote without '\\' means the body is
+		// bind-ready and can be arena-aliased without re-scanning.
 		escapeFree := true
 		for i := off + 1; i < len(d.buf); {
 			n := scan.ScanBasicStringStrict(d.buf[i:])
@@ -894,10 +902,10 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 			}
 			switch d.buf[i] {
 			case '\n', '\r':
-				return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+				return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 			case '\\':
 				if i+1 >= len(d.buf) {
-					return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+					return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 				}
 				escapeFree = false
 				i += 2
@@ -905,30 +913,31 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 				end := i + 1
 				if !escapeFree {
 					if err := validateStringValue(d.buf[off:end]); err != nil {
-						return 0, TokenKindInvalid, err
+						return 0, TokenKindInvalid, 0, err
 					}
+					return end, TokenKindValueString, 0, nil
 				}
-				return end, TokenKindValueString, nil
+				return end, TokenKindValueString, tokenFlagStringBodyOK, nil
 			default:
-				return 0, TokenKindInvalid, stringControlError(d.buf[off+1:], i-off-1)
+				return 0, TokenKindInvalid, 0, stringControlError(d.buf[off+1:], i-off-1)
 			}
 		}
-		return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 	}
 	i := off + 1
 	n := scan.ScanLiteralString(d.buf[i:])
 	if hasNewlineBefore(d.buf[i:], n) {
-		return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 	}
 	i += n
 	if i < len(d.buf) {
 		end := i + 1
 		if err := validateStringValue(d.buf[off:end]); err != nil {
-			return 0, TokenKindInvalid, err
+			return 0, TokenKindInvalid, 0, err
 		}
-		return end, TokenKindValueString, nil
+		return end, TokenKindValueString, tokenFlagStringBodyOK, nil
 	}
-	return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+	return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 }
 
 func countByteRun(raw []byte, b byte) int {
@@ -991,14 +1000,19 @@ func (d *Decoder) computeLineCol(off int) (line, col int) {
 	return lineColForOffset(d.buf, off)
 }
 
+
+
 func (d *Decoder) makeToken(kind TokenKind, raw []byte, offset int, scalar tokenScalar) rawToken {
+	return d.makeTokenFlags(kind, raw, offset, scalar, 0)
+}
+
+func (d *Decoder) makeTokenFlags(kind TokenKind, raw []byte, offset int, scalar tokenScalar, flags tokenFlags) rawToken {
 	d.tokenScalar = scalar
 	if d.trackTokenPositions {
 		d.tokenLine, d.tokenCol = d.computeLineCol(offset)
 	}
-	return rawToken{Kind: kind, Bytes: raw, Offset: offset}
+	return rawToken{Kind: kind, Bytes: raw, Offset: offset, flags: flags}
 }
-
 func lineColForOffset(data []byte, off int) (line, col int) {
 	if off < 0 {
 		off = 0

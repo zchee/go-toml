@@ -164,7 +164,9 @@ func directTypeContainsMap(t reflect.Type, seen map[reflect.Type]bool) (bool, er
 //
 //nolint:cyclop,funlen,gocognit,gocyclo // direct-decode token dispatch with table/array bookkeeping; cohesive state machine.
 func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindConfig) error {
-	dec := NewDecoderBytes(data, decoderOptionsWithoutTokenPositions(opts)...)
+	var decStorage Decoder
+	dec := &decStorage
+	initDecoderBytes(dec, data, decoderOptionsWithoutTokenPositions(opts)...)
 	current := dst
 	currentInfo, err := directStructInfo(current)
 	if err != nil {
@@ -933,9 +935,18 @@ func directNextValueToken(dec *Decoder) (rawToken, error) {
 	}
 }
 
-func directStringValue(dec *Decoder, raw []byte, cfg bindConfig) (string, error) {
+func directStringValue(dec *Decoder, tok rawToken, cfg bindConfig) (string, error) {
+	raw := tok.Bytes
 	if dec == nil || cfg.copyStrings {
 		return parseStringValue(raw)
+	}
+	// Tokenizer already validated an escape-free body: alias without re-scan.
+	if tok.flags&tokenFlagStringBodyOK != 0 {
+		body := readyStringBody(raw)
+		if s, ok := dec.arenaString(body); ok {
+			return s, nil
+		}
+		return string(body), nil
 	}
 	body, kind, err := stringValueBody(raw)
 	if err != nil {
@@ -953,6 +964,18 @@ func directStringValue(dec *Decoder, raw []byte, cfg bindConfig) (string, error)
 	default:
 		return "", malformedStringError(raw)
 	}
+}
+
+// readyStringBody strips quotes from a tokenizer-validated string token.
+func readyStringBody(raw []byte) []byte {
+	if len(raw) < 2 {
+		return nil
+	}
+	q := raw[0]
+	if len(raw) >= 6 && raw[1] == q && raw[2] == q && (q == '"' || q == '\'') {
+		return trimInitialMultilineStringNewline(raw[3 : len(raw)-3])
+	}
+	return raw[1 : len(raw)-1]
 }
 
 func directLiteralStringValue(dec *Decoder, raw, body []byte, multiline bool) (string, error) {
@@ -1002,13 +1025,23 @@ func (d *Decoder) arenaString(raw []byte) (string, bool) {
 	return unsafe.String(&d.buf[off], len(raw)), true
 }
 
-func directBytesValue(dec *Decoder, raw []byte, cfg bindConfig) ([]byte, error) {
+func directBytesValue(dec *Decoder, tok rawToken, cfg bindConfig) ([]byte, error) {
+	raw := tok.Bytes
 	if dec == nil || cfg.copyStrings {
 		s, err := parseStringValue(raw)
 		if err != nil {
 			return nil, err
 		}
 		return []byte(s), nil
+	}
+	if tok.flags&tokenFlagStringBodyOK != 0 {
+		body := readyStringBody(raw)
+		if b, ok := dec.arenaBytes(body); ok {
+			return b, nil
+		}
+		out := make([]byte, len(body))
+		copy(out, body)
+		return out, nil
 	}
 	body, kind, err := stringValueBody(raw)
 	if err != nil {
@@ -1092,7 +1125,7 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 	switch valueKind {
 	case directValueString:
 		if tok.Kind == TokenKindValueString {
-			s, err := directStringValue(dec, tok.Bytes, cfg)
+			s, err := directStringValue(dec, tok, cfg)
 			if err != nil {
 				return err
 			}
@@ -1166,7 +1199,7 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 		}
 	case directValueBytes:
 		if tok.Kind == TokenKindValueString {
-			b, err := directBytesValue(dec, tok.Bytes, cfg)
+			b, err := directBytesValue(dec, tok, cfg)
 			if err != nil {
 				return err
 			}
@@ -1183,7 +1216,7 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 			dst.SetInt(i)
 			return nil
 		case TokenKindValueString:
-			s, err := directStringValue(dec, tok.Bytes, cfg)
+			s, err := directStringValue(dec, tok, cfg)
 			if err != nil {
 				return err
 			}

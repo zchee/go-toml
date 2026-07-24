@@ -544,7 +544,7 @@ func TestDirectStringValueCopiedStringsBypassesArena(t *testing.T) {
 	input := []byte("value = \"alpha\"\n")
 	raw := input[bytes.IndexByte(input, '"') : len(input)-1]
 	dec := NewDecoderBytes(input)
-	got, err := directStringValue(dec, raw, bindConfig{copyStrings: true})
+	got, err := directStringValue(dec, rawToken{Kind: TokenKindValueString, Bytes: raw}, bindConfig{copyStrings: true})
 	if err != nil {
 		t.Fatalf("directStringValue(copyStrings) error = %v", err)
 	}
