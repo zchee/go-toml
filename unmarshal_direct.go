@@ -27,11 +27,53 @@ import (
 	"unsafe"
 
 	"github.com/zchee/go-toml/internal/reflectcache"
+	"github.com/zchee/go-toml/internal/scan"
 )
 
 var errDirectUnknownField = errors.New("toml: direct destination field is unknown")
 
 var directStructEligibilityCache sync.Map // map[reflect.Type]bool
+
+// directTypeInfo caches per-field directValueKind alongside reflectcache.TypeInfo
+// so hot-path key binds avoid re-deriving kinds from reflect.Type.
+type directTypeInfo struct {
+	info  *reflectcache.TypeInfo
+	kinds []directValueKind
+}
+
+var directTypeInfoCache sync.Map // map[reflect.Type]*directTypeInfo
+
+func directTypeInfoOrNil(v reflect.Value) *directTypeInfo {
+	v = directWritableValue(v)
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return nil
+	}
+	dt, err := lookupDirectTypeInfo(v.Type())
+	if err != nil {
+		return nil
+	}
+	return dt
+}
+
+func lookupDirectTypeInfo(t reflect.Type) (*directTypeInfo, error) {
+	if v, ok := directTypeInfoCache.Load(t); ok {
+		return v.(*directTypeInfo), nil
+	}
+	info, err := reflectcache.Lookup(t)
+	if err != nil {
+		return nil, err
+	}
+	kinds := make([]directValueKind, len(info.Fields))
+	for i := range info.Fields {
+		kinds[i] = directValueKindOfType(info.Fields[i].Type)
+	}
+	dt := &directTypeInfo{info: info, kinds: kinds}
+	if v, loaded := directTypeInfoCache.LoadOrStore(t, dt); loaded {
+		return v.(*directTypeInfo), nil
+	}
+	return dt, nil
+}
+
 var directRawPathExtraPool = sync.Pool{
 	New: func() any {
 		return new([][]byte)
@@ -158,6 +200,95 @@ func directTypeContainsMap(t reflect.Type, seen map[reflect.Type]bool) (bool, er
 	}
 }
 
+
+// tryBindSimpleAssignment attempts to decode one top-level bare-key assignment
+// without going through Decoder.readToken. Returns handled=false when the next
+// construct is not a simple assignment (headers, comments, dotted/quoted keys).
+func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directTypeInfo, cfg bindConfig, path *directPathState) (bool, error) {
+	if dec.err != nil {
+		return false, dec.err
+	}
+	dec.skipSpaces()
+	if dec.off >= len(dec.buf) {
+		return false, nil
+	}
+	buf := dec.buf
+	off := dec.off
+	b := buf[off]
+	// Only bare-key starts; headers/comments/quoted keys fall back.
+	if b == '[' || b == '#' || b == '"' || b == '\'' || b == '\r' {
+		return false, nil
+	}
+
+	n := scan.ScanBareKey(buf[off:])
+	if n == 0 {
+		return false, nil
+	}
+	keyEnd := off + n
+	eq := keyEnd
+	for eq < len(buf) {
+		c := buf[eq]
+		if c != ' ' && c != '\t' {
+			break
+		}
+		eq++
+	}
+	if eq >= len(buf) || buf[eq] != '=' {
+		// Dotted key (key.sub = ...) or incomplete — use the token path.
+		return false, nil
+	}
+
+	key := buf[off:keyEnd]
+	// Advance past key, spaces, and '='. Direct bind disables position tracking.
+	dec.off = eq + 1
+	dec.atLineStart = false
+
+	// Horizontal space before the value.
+	voff := dec.off
+	for voff < len(buf) {
+		c := buf[voff]
+		if c != ' ' && c != '\t' {
+			break
+		}
+		voff++
+	}
+	dec.off = voff
+	if voff >= len(buf) {
+		return false, dec.syntaxError("expected value", voff)
+	}
+
+	idx, ok := lookupStructFieldIndex(dt.info, key)
+	if !ok {
+		// Unknown field: skip the value via the normal decoder state.
+		dec.expectingValue = true
+		dec.valueNoNewline = true
+		if err := skipNextValue(dec); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	field := &dt.info.Fields[idx]
+	dst := fieldValue(current, field.Index)
+	kind := dt.kinds[idx]
+
+	// Scan the value using the existing value scanner, then bind.
+	dec.expectingValue = true
+	dec.valueNoNewline = true
+	tok, err := dec.scanValueToken()
+	if err != nil {
+		return false, err
+	}
+	if err := directBindTypedToken(dec, tok, dst, kind, cfg); err != nil {
+		name := string(key)
+		if base := path.string(); base != "" {
+			name = base + "." + name
+		}
+		return false, bindErrorPath(err, name)
+	}
+	return true, nil
+}
+
 // bindDocumentDirect decodes the token stream directly into dst. It avoids the
 // intermediate documentMap used by generic callers while preserving the same
 // Decoder.ReadToken source of truth as the rest of the facade.
@@ -174,7 +305,26 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 	}
 	currentPath := directPathState{}
 	defer currentPath.raw.releaseExtra()
+	var currentDirect *directTypeInfo
+	if current.IsValid() && current.Kind() == reflect.Struct {
+		if dt, err := lookupDirectTypeInfo(current.Type()); err == nil {
+			currentDirect = dt
+			currentInfo = dt.info
+		}
+	}
 	for {
+		// Fused path: top-level "barekey = value" lines skip the full token
+		// state machine (two readToken round-trips + makeToken).
+		if !dec.expectingValue && dec.containerDepth == 0 && currentDirect != nil {
+			handled, err := tryBindSimpleAssignment(dec, current, currentDirect, cfg, &currentPath)
+			if err != nil {
+				return err
+			}
+			if handled {
+				continue
+			}
+		}
+
 		tok, err := dec.readToken()
 		if err == io.EOF {
 			return nil
@@ -198,6 +348,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 					path.releaseExtra()
 					return err
 				}
+				currentDirect = directTypeInfoOrNil(current)
 				currentPath.raw.releaseExtra()
 				currentPath.raw = path
 				currentPath.valid = true
@@ -218,6 +369,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 			if err != nil {
 				return err
 			}
+			currentDirect = directTypeInfoOrNil(current)
 			currentPath.raw.releaseExtra()
 			currentPath.raw = directRawPath{}
 			currentPath.text = path
@@ -236,6 +388,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 					path.releaseExtra()
 					return err
 				}
+				currentDirect = directTypeInfoOrNil(current)
 				currentPath.raw.releaseExtra()
 				currentPath.raw = path
 				currentPath.valid = true
@@ -256,6 +409,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 			if err != nil {
 				return err
 			}
+			currentDirect = directTypeInfoOrNil(current)
 			currentPath.raw.releaseExtra()
 			currentPath.raw = directRawPath{}
 			currentPath.text = path
@@ -515,18 +669,30 @@ func directAssignmentForKeyInfo(root reflect.Value, info *reflectcache.TypeInfo,
 	cur := directWritableValue(root)
 	switch cur.Kind() {
 	case reflect.Struct:
-		if info == nil || info.Type != cur.Type() {
+		var dt *directTypeInfo
+		if info != nil && info.Type == cur.Type() {
+			// Hot path: caller already holds TypeInfo from the current table.
+			if v, ok := directTypeInfoCache.Load(cur.Type()); ok {
+				dt = v.(*directTypeInfo)
+			}
+		}
+		if dt == nil {
 			var err error
-			info, err = reflectcache.Lookup(cur.Type())
+			dt, err = lookupDirectTypeInfo(cur.Type())
 			if err != nil {
 				return directAssignment{}, false, normalizeReflectcacheError(err)
 			}
 		}
-		field, ok := lookupStructFieldBytes(info, raw)
+		idx, ok := lookupStructFieldIndex(dt.info, raw)
 		if !ok {
 			return directAssignment{}, false, nil
 		}
-		return directAssignment{rawName: raw, dst: cur.FieldByIndex(field.Index), valueKind: directValueKindOfType(field.Type)}, true, nil
+		field := &dt.info.Fields[idx]
+		return directAssignment{
+			rawName:   raw,
+			dst:       fieldValue(cur, field.Index),
+			valueKind: dt.kinds[idx],
+		}, true, nil
 	case reflect.Map:
 		if cur.Type().Key().Kind() != reflect.String {
 			return directAssignment{}, false, &UnsupportedTypeError{Type: cur.Type().String()}
@@ -552,30 +718,71 @@ const smallStructFieldLimit = 8
 // followed by the ASCII case-insensitive fallback: exact and alias matches win
 // over the case-folded scan, mirroring info.ByName exactly.
 func lookupStructFieldBytes(info *reflectcache.TypeInfo, name []byte) (*reflectcache.Field, bool) {
+	idx, ok := lookupStructFieldIndex(info, name)
+	if !ok {
+		return nil, false
+	}
+	return &info.Fields[idx], true
+}
+
+func lookupStructFieldIndex(info *reflectcache.TypeInfo, name []byte) (int, bool) {
 	fields := info.Fields
 	key := unsafeString(name)
 	if len(fields) <= smallStructFieldLimit {
+		// TOML config keys are almost always already lowercase ASCII. Match
+		// LowerNames first so the common path does one equality per field
+		// instead of Name||LowerNames on every candidate.
+		if asciiAllLower(name) {
+			for i := range info.LowerNames {
+				if info.LowerNames[i] == key {
+					return i, true
+				}
+			}
+			return 0, false
+		}
 		for i := range fields {
 			if fields[i].Name == key || info.LowerNames[i] == key {
-				return &fields[i], true
+				return i, true
 			}
 		}
 		for i := range fields {
 			if asciiEqualFoldStringBytes(fields[i].Name, name) {
-				return &fields[i], true
+				return i, true
 			}
 		}
-		return nil, false
+		return 0, false
 	}
 	if idx, ok := info.ByNameIndex[key]; ok {
-		return &fields[idx], true
+		return int(idx), true
 	}
 	for i := range fields {
 		if asciiEqualFoldStringBytes(fields[i].Name, name) {
-			return &fields[i], true
+			return i, true
 		}
 	}
-	return nil, false
+	return 0, false
+}
+
+// asciiAllLower reports whether b is non-empty and contains no ASCII uppercase.
+func asciiAllLower(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+// fieldValue resolves a field by index path. Shallow (non-embedded) fields use
+// the cheaper Field(i) path instead of FieldByIndex.
+func fieldValue(v reflect.Value, index []int) reflect.Value {
+	if len(index) == 1 {
+		return v.Field(index[0])
+	}
+	return v.FieldByIndex(index)
 }
 
 func asciiEqualFoldStringBytes(s string, b []byte) bool {
@@ -719,7 +926,7 @@ func directDestinationRaw(root reflect.Value, path directRawPath) (reflect.Value
 			if !ok {
 				return reflect.Value{}, directValueGeneric, false, nil
 			}
-			cur = cur.FieldByIndex(field.Index)
+			cur = fieldValue(cur, field.Index)
 		case reflect.Map:
 			return reflect.Value{}, directValueGeneric, true, nil
 		default:
@@ -746,7 +953,7 @@ func directDestination(root reflect.Value, path []string) (reflect.Value, direct
 			if !ok {
 				return reflect.Value{}, directValueGeneric, false, nil
 			}
-			cur = cur.FieldByIndex(field.Index)
+			cur = fieldValue(cur, field.Index)
 		case reflect.Map:
 			return reflect.Value{}, directValueGeneric, true, nil
 		default:
@@ -1327,7 +1534,7 @@ func directFieldRaw(container reflect.Value, name []byte) (reflect.Value, error)
 		if !ok {
 			return reflect.Value{}, errDirectUnknownField
 		}
-		return container.FieldByIndex(field.Index), nil
+		return fieldValue(container, field.Index), nil
 	case reflect.Map:
 		if container.Type().Key().Kind() != reflect.String {
 			return reflect.Value{}, &UnsupportedTypeError{Type: container.Type().String()}
@@ -1357,7 +1564,7 @@ func directField(container reflect.Value, name string) (reflect.Value, error) {
 		if !ok {
 			return reflect.Value{}, errDirectUnknownField
 		}
-		return container.FieldByIndex(field.Index), nil
+		return fieldValue(container, field.Index), nil
 	case reflect.Map:
 		if container.Type().Key().Kind() != reflect.String {
 			return reflect.Value{}, &UnsupportedTypeError{Type: container.Type().String()}
