@@ -90,7 +90,7 @@ func TestDecoderTokenLineColCompatibilityFields(t *testing.T) {
 	t.Parallel()
 
 	input := []byte("# top\r\nnext = true\n")
-	tokens := mustReadAllTokens(t, NewDecoderBytes(input))
+	tokens := mustReadAllTokens(t, NewDecoderBytes(input, WithTokenPositions()))
 	wants := []struct {
 		name   string
 		index  int

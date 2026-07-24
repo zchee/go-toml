@@ -84,6 +84,16 @@ func WithCopiedStrings() Option {
 	}
 }
 
+// WithTokenPositions enables Token.Line and Token.Col population on ReadToken.
+// Positions are deprecated and off by default because incremental line/column
+// tracking is expensive; use Token.Offset and derive line/column only when needed.
+// SyntaxError positions are still computed on demand via offset scan.
+func WithTokenPositions() Option {
+	return func(d *Decoder) {
+		d.trackTokenPositions = true
+	}
+}
+
 func withoutTokenPositions(d *Decoder) {
 	d.trackTokenPositions = false
 }
@@ -199,7 +209,7 @@ func NewDecoder(r io.Reader, opts ...Option) *Decoder {
 		line:                1,
 		col:                 1,
 		atLineStart:         true,
-		trackTokenPositions: true,
+		trackTokenPositions: false,
 		limits: Limits{
 			MaxNestedDepth:  DefaultMaxNestedDepth,
 			MaxKeyLength:    DefaultMaxKeyLength,
@@ -248,7 +258,7 @@ func initDecoderBytes(d *Decoder, data []byte, opts ...Option) {
 		col:                 1,
 		atLineStart:         true,
 		buf:                 data,
-		trackTokenPositions: true,
+		trackTokenPositions: false,
 		limits: Limits{
 			MaxNestedDepth:  DefaultMaxNestedDepth,
 			MaxKeyLength:    DefaultMaxKeyLength,

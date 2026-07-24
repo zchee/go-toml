@@ -119,13 +119,15 @@ type Token struct {
 	// Line is the 1-based line of the token start.
 	//
 	// Deprecated: use Offset as the stable token position and derive line/column
-	// from the original source only when presenting diagnostics.
+	// from the original source only when presenting diagnostics. Line/Col are
+	// populated only when the decoder is created with WithTokenPositions.
 	Line int
 
 	// Col is the 1-based column of the token start.
 	//
 	// Deprecated: use Offset as the stable token position and derive line/column
-	// from the original source only when presenting diagnostics.
+	// from the original source only when presenting diagnostics. Line/Col are
+	// populated only when the decoder is created with WithTokenPositions.
 	Col int
 
 	scalar tokenScalar
