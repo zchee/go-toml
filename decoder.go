@@ -440,9 +440,19 @@ func (d *Decoder) readToken() (rawToken, error) {
 }
 
 func (d *Decoder) skipSpaces() {
+	if d.trackTokenPositions {
+		d.skipSpacesTracked()
+		return
+	}
+	d.skipSpacesFast()
+}
+
+// skipSpacesFast is the default path with Token.Line/Col tracking disabled.
+// Keeping track checks out of this loop is a measurable DecoderTokens win.
+func (d *Decoder) skipSpacesFast() {
 	buf := d.buf
 	off := d.off
-	track := d.trackTokenPositions
+	valueNoNL := d.valueNoNewline
 	for off < len(buf) {
 		b := buf[off]
 		// Hot path: next token starts immediately (bare key, quote, bracket, …).
@@ -468,10 +478,67 @@ func (d *Decoder) skipSpaces() {
 					break
 				}
 			}
+			// Horizontal space must not clear atLineStart.
 			wasAtLineStart := d.atLineStart
-			if track {
-				d.col += n
+			off += n
+			d.atLineStart = wasAtLineStart
+		case '\n':
+			if valueNoNL {
+				d.off = off
+				return
 			}
+			off++
+			d.atLineStart = true
+			d.needLineEnd = false
+		case '\r':
+			if off+1 < len(buf) && buf[off+1] == '\n' {
+				if valueNoNL {
+					d.off = off
+					return
+				}
+				off += 2
+				d.atLineStart = true
+				d.needLineEnd = false
+				continue
+			}
+			// Lone CR: leave for readToken's bare-CR error.
+			d.off = off
+			return
+		default:
+			// Other C0 bytes (including unexpected controls) stay put.
+			d.off = off
+			return
+		}
+	}
+	d.off = off
+}
+
+// skipSpacesTracked updates line/col while skipping (WithTokenPositions).
+func (d *Decoder) skipSpacesTracked() {
+	buf := d.buf
+	off := d.off
+	for off < len(buf) {
+		b := buf[off]
+		if b > ' ' {
+			d.off = off
+			return
+		}
+		switch b {
+		case ' ', '\t':
+			n := 1
+			for off+n < len(buf) {
+				c := buf[off+n]
+				if c != ' ' && c != '\t' {
+					break
+				}
+				n++
+				if n >= 16 {
+					n = scan.SkipWhitespace(buf[off:])
+					break
+				}
+			}
+			wasAtLineStart := d.atLineStart
+			d.col += n
 			off += n
 			d.atLineStart = wasAtLineStart
 		case '\n':
@@ -480,10 +547,8 @@ func (d *Decoder) skipSpaces() {
 				return
 			}
 			off++
-			if track {
-				d.line++
-				d.col = 1
-			}
+			d.line++
+			d.col = 1
 			d.atLineStart = true
 			d.needLineEnd = false
 		case '\r':
@@ -495,19 +560,15 @@ func (d *Decoder) skipSpaces() {
 				// CRLF: line accounting matches advancePosition — only LF
 				// bumps the line; CR is invisible to columns.
 				off += 2
-				if track {
-					d.line++
-					d.col = 1
-				}
+				d.line++
+				d.col = 1
 				d.atLineStart = true
 				d.needLineEnd = false
 				continue
 			}
-			// Lone CR: leave for readToken's bare-CR error.
 			d.off = off
 			return
 		default:
-			// Other C0 bytes (including unexpected controls) stay put.
 			d.off = off
 			return
 		}
