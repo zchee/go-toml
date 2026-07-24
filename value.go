@@ -51,7 +51,9 @@ var documentMapPool = sync.Pool{
 
 //nolint:cyclop,funlen,gocognit,gocyclo // top-level TOML statement dispatch with table/array-table bookkeeping; cohesive state machine.
 func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMap, error) {
-	dec := NewDecoderBytes(data, decoderOptionsWithoutTokenPositions(opts)...)
+	var decStorage Decoder
+	dec := &decStorage
+	initDecoderBytes(dec, data, decoderOptionsWithoutTokenPositions(opts)...)
 	root := newDocumentMap()
 	current := root
 	currentPath := []string(nil)
@@ -475,7 +477,7 @@ func (d *Decoder) scanSkippedValue(start int, push func(byte, int) error) (int, 
 		}
 		return start + 1, nil
 	case '"', '\'':
-		end, _, err := d.scanString(start)
+		end, _, _, err := d.scanString(start)
 		if err != nil {
 			return 0, err
 		}

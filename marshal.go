@@ -72,28 +72,13 @@ func Marshal(v any) ([]byte, error) {
 
 func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
 	hint := marshalSizeHint(v)
-	if hint > maxMarshalSizeHint {
-		var buf bytes.Buffer
-		if hint > 0 {
-			buf.Grow(hint)
-		}
-		if err := marshalToBufferDirect(&buf, v, opts); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
-	}
-
-	buf := getMarshalBuffer()
-	if hint > 0 {
-		buf.Grow(hint)
-	}
+	// Single allocation sized to the hint; returned bytes are exclusively
+	// owned by the caller (no pool, no copy-on-return).
+	buf := bytes.NewBuffer(make([]byte, 0, hint))
 	if err := marshalToBufferDirect(buf, v, opts); err != nil {
-		putMarshalBuffer(buf)
 		return nil, err
 	}
-	out := append([]byte(nil), buf.Bytes()...)
-	putMarshalBuffer(buf)
-	return out, nil
+	return buf.Bytes(), nil
 }
 
 func getMarshalBuffer() *bytes.Buffer {
