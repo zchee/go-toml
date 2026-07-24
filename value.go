@@ -16,7 +16,6 @@ package toml
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -66,7 +65,7 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 	var closedInlineTables map[string]string
 	for {
 		tok, err := dec.readToken()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF {
 			return root, nil
 		}
 		if err != nil {
@@ -288,8 +287,8 @@ func skipStructuralValueFast(dec *Decoder) (bool, error) {
 	if dec.innermostIsArray() {
 		dec.expectingValue = true
 	}
-	dec.needSeparator = len(dec.containerStack) > 0
-	dec.needLineEnd = len(dec.containerStack) == 0
+	dec.needSeparator = dec.containerDepth > 0
+	dec.needLineEnd = dec.containerDepth == 0
 	return true, nil
 }
 

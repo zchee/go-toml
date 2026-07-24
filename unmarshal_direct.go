@@ -176,7 +176,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 	defer currentPath.raw.releaseExtra()
 	for {
 		tok, err := dec.readToken()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF {
 			return nil
 		}
 		if err != nil {
@@ -928,10 +928,9 @@ func directNextValueToken(dec *Decoder) (rawToken, error) {
 		if err != nil {
 			return rawToken{}, err
 		}
-		if tok.Kind == TokenKindComment {
-			continue
+		if tok.Kind != TokenKindComment {
+			return tok, nil
 		}
-		return tok, nil
 	}
 }
 
