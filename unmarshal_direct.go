@@ -416,6 +416,8 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		return dec.syntaxError("expected array", i)
 	}
 	i++
+	// Cap 4 matches cargo.lock median; setDirectStringSlice stores the header
+	// without reflect.ValueOf([]T) eface allocation.
 	out := make([]string, 0, 4)
 	for i < len(buf) {
 		for i < len(buf) {
@@ -439,7 +441,7 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		c := buf[i]
 		if c == ']' {
 			finishTopLevelArrayValue(dec, i+1)
-			dst.Set(reflect.ValueOf(out))
+			setDirectStringSlice(dst, out)
 			return nil
 		}
 		if c == '#' {
@@ -476,6 +478,17 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		i = end
 	}
 	return dec.syntaxError("unterminated array", start)
+}
+
+// setDirectStringSlice assigns s into a settable []string field without the
+// extra heap allocation that reflect.ValueOf([]T) performs for the eface header.
+// The slice header is written via unsafe so the local slice need not escape.
+func setDirectStringSlice(dst reflect.Value, s []string) {
+	if dst.Kind() != reflect.Slice || !dst.CanAddr() {
+		dst.Set(reflect.ValueOf(s))
+		return
+	}
+	*(*[]string)(dst.Addr().UnsafePointer()) = s
 }
 
 func finishTopLevelArrayValue(dec *Decoder, i int) {
@@ -1835,7 +1848,7 @@ func directBindStringSlice(dec *Decoder, dst reflect.Value, cfg bindConfig) erro
 			return err
 		}
 		if tok.Kind == TokenKindArrayEnd {
-			dst.Set(reflect.ValueOf(out))
+			setDirectStringSlice(dst, out)
 			return nil
 		}
 		if tok.Kind != TokenKindValueString {
