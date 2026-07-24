@@ -245,36 +245,7 @@ func skipSimpleStringArrayValue(dec *Decoder) (bool, error) {
 		}
 		c := buf[i]
 		if c == ']' {
-			i++
-			dec.off = i
-			dec.atLineStart = false
-			dec.expectingValue = false
-			dec.valueNoNewline = false
-			dec.needSeparator = false
-			dec.needLineEnd = true
-			// consume trailing newline like a normal top-level value
-			for i < len(buf) {
-				c := buf[i]
-				if c == ' ' || c == '\t' {
-					i++
-					continue
-				}
-				if c == '\n' {
-					i++
-					dec.off = i
-					dec.atLineStart = true
-					dec.needLineEnd = false
-					break
-				}
-				if c == '\r' && i+1 < len(buf) && buf[i+1] == '\n' {
-					i += 2
-					dec.off = i
-					dec.atLineStart = true
-					dec.needLineEnd = false
-					break
-				}
-				break
-			}
+			finishTopLevelArrayValue(dec, i+1)
 			return true, nil
 		}
 		if c == '#' {
@@ -417,12 +388,13 @@ func tryBindArrayOrTableHeader(
 	elem, index := appendDirectSliceElement(slot, hint)
 
 	*current = elem
-	info, err := directStructInfo(elem)
+	// Element type is stable for a given array-table field; cache via type.
+	dt, err := lookupDirectTypeInfo(elem.Type())
 	if err != nil {
-		return false, err
+		return false, normalizeReflectcacheError(err)
 	}
-	*currentInfo = info
-	*currentDirect = directTypeInfoOrNil(elem)
+	*currentInfo = dt.info
+	*currentDirect = dt
 	currentPath.raw.releaseExtra()
 	var path directRawPath
 	path.append(key)
@@ -431,6 +403,110 @@ func tryBindArrayOrTableHeader(
 	currentPath.text = nil
 	currentPath.arrayIndex = index
 	return true, nil
+}
+
+
+// bindFusedStringArray decodes a simple string array value starting at '['.
+// It is the bind counterpart of skipSimpleStringArrayValue.
+func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error {
+	buf := dec.buf
+	start := dec.off
+	i := start
+	if i >= len(buf) || buf[i] != '[' {
+		return dec.syntaxError("expected array", i)
+	}
+	i++
+	out := make([]string, 0, 4)
+	for i < len(buf) {
+		for i < len(buf) {
+			c := buf[i]
+			if c == ' ' || c == '\t' || c == '\n' {
+				i++
+				continue
+			}
+			if c == '\r' {
+				if i+1 < len(buf) && buf[i+1] == '\n' {
+					i += 2
+					continue
+				}
+				return dec.syntaxError("bare carriage return", i)
+			}
+			break
+		}
+		if i >= len(buf) {
+			return dec.syntaxError("unterminated array", start)
+		}
+		c := buf[i]
+		if c == ']' {
+			finishTopLevelArrayValue(dec, i+1)
+			dst.Set(reflect.ValueOf(out))
+			return nil
+		}
+		if c == '#' {
+			for i < len(buf) && buf[i] != '\n' && buf[i] != '\r' {
+				i++
+			}
+			continue
+		}
+		if c == ',' {
+			i++
+			continue
+		}
+		if c != '"' && c != '\'' {
+			// Complex element: reset to '[' and use the generic array binder.
+			dec.off = start
+			dec.expectingValue = true
+			dec.valueNoNewline = true
+			tok, err := dec.scanValueToken()
+			if err != nil {
+				return err
+			}
+			return directBindTypedToken(dec, tok, dst, directValueArray, cfg)
+		}
+		end, _, flags, err := dec.scanString(i)
+		if err != nil {
+			return err
+		}
+		tok := rawToken{Kind: TokenKindValueString, Bytes: buf[i:end], Offset: i, flags: flags}
+		s, err := directStringValue(dec, tok, cfg)
+		if err != nil {
+			return err
+		}
+		out = append(out, s)
+		i = end
+	}
+	return dec.syntaxError("unterminated array", start)
+}
+
+func finishTopLevelArrayValue(dec *Decoder, i int) {
+	buf := dec.buf
+	dec.atLineStart = false
+	dec.expectingValue = false
+	dec.valueNoNewline = false
+	dec.needSeparator = false
+	dec.needLineEnd = true
+	for i < len(buf) {
+		c := buf[i]
+		if c == ' ' || c == '\t' {
+			i++
+			continue
+		}
+		if c == '\n' {
+			dec.off = i + 1
+			dec.atLineStart = true
+			dec.needLineEnd = false
+			return
+		}
+		if c == '\r' && i+1 < len(buf) && buf[i+1] == '\n' {
+			dec.off = i + 2
+			dec.atLineStart = true
+			dec.needLineEnd = false
+			return
+		}
+		dec.off = i
+		return
+	}
+	dec.off = i
 }
 
 // tryBindSimpleAssignment attempts to decode one top-level bare-key assignment
@@ -507,6 +583,22 @@ func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directType
 	field := &dt.info.Fields[idx]
 	dst := fieldValue(current, field.Index)
 	kind := dt.kinds[idx]
+	errName := func() string {
+		name := unsafeString(key)
+		if base := path.string(); base != "" {
+			return base + "." + name
+		}
+		return name
+	}
+
+	// Known []string (e.g. dependencies): bind without scanValueToken/ArrayStart.
+	if kind == directValueArray && dec.buf[dec.off] == '[' &&
+		dst.Kind() == reflect.Slice && dst.Type().Elem().Kind() == reflect.String {
+		if err := bindFusedStringArray(dec, dst, cfg); err != nil {
+			return false, bindErrorPath(err, errName())
+		}
+		return true, nil
+	}
 
 	// Scan the value using the existing value scanner, then bind.
 	dec.expectingValue = true
@@ -516,11 +608,7 @@ func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directType
 		return false, err
 	}
 	if err := directBindTypedToken(dec, tok, dst, kind, cfg); err != nil {
-		name := string(key)
-		if base := path.string(); base != "" {
-			name = base + "." + name
-		}
-		return false, bindErrorPath(err, name)
+		return false, bindErrorPath(err, errName())
 	}
 	return true, nil
 }

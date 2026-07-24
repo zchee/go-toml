@@ -158,3 +158,226 @@ count = "bad"
 		t.Fatalf("path = %q", mismatch.Path)
 	}
 }
+
+func TestFusedBindStringSliceEmptyAndTrailingComma(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		Deps []string `toml:"deps"`
+		Name string
+	}
+	input := []byte(`
+deps = [
+  "a",
+  "b",
+]
+name = "ok"
+`)
+	var dst cfg
+	if err := Unmarshal(input, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Name != "ok" {
+		t.Fatalf("name = %q", dst.Name)
+	}
+	if got := dst.Deps; len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("deps = %#v", got)
+	}
+
+	var empty cfg
+	if err := Unmarshal([]byte(`deps = []
+name = "e"
+`), &empty); err != nil {
+		t.Fatal(err)
+	}
+	if empty.Name != "e" || empty.Deps == nil || len(empty.Deps) != 0 {
+		t.Fatalf("empty = %+v", empty)
+	}
+}
+
+func TestFusedBindStringSliceWithComments(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		Deps []string `toml:"deps"`
+		Next int
+	}
+	input := []byte(`
+deps = [
+  # leading
+  "x",
+  "y", # trailing comment
+  # between
+  "z",
+]
+next = 9
+`)
+	var dst cfg
+	if err := Unmarshal(input, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Next != 9 {
+		t.Fatalf("next = %d", dst.Next)
+	}
+	if got := dst.Deps; len(got) != 3 || got[0] != "x" || got[1] != "y" || got[2] != "z" {
+		t.Fatalf("deps = %#v", got)
+	}
+}
+
+func TestFusedBindStringSliceComplexFallback(t *testing.T) {
+	t.Parallel()
+	// Non-string element forces generic array binder; subsequent keys must still work.
+	type cfg struct {
+		Nums []int `toml:"nums"`
+		Name string
+	}
+	input := []byte(`
+nums = [1, 2, 3]
+name = "ok"
+`)
+	var dst cfg
+	if err := Unmarshal(input, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Name != "ok" || len(dst.Nums) != 3 || dst.Nums[0] != 1 || dst.Nums[2] != 3 {
+		t.Fatalf("got %+v", dst)
+	}
+}
+
+func TestFusedBindStringSliceMixedElementFallback(t *testing.T) {
+	t.Parallel()
+	// []any with a non-string forces reset-to-'[' generic bind.
+	type cfg struct {
+		Items []any `toml:"items"`
+		Name  string
+	}
+	input := []byte(`
+items = ["a", 1]
+name = "ok"
+`)
+	var dst cfg
+	if err := Unmarshal(input, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Name != "ok" || len(dst.Items) != 2 {
+		t.Fatalf("got %+v", dst)
+	}
+	if dst.Items[0] != "a" {
+		t.Fatalf("items[0] = %#v", dst.Items[0])
+	}
+}
+
+func TestFusedBindQuotedKeyFallback(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		Name  string `toml:"my-name"`
+		Count int
+	}
+	input := []byte(`
+"my-name" = "quoted"
+count = 3
+`)
+	var dst cfg
+	if err := Unmarshal(input, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Name != "quoted" || dst.Count != 3 {
+		t.Fatalf("got %+v", dst)
+	}
+}
+
+func TestFusedBindUnknownArrayThenKnownFields(t *testing.T) {
+	t.Parallel()
+	type pkg struct {
+		Name    string
+		Version string
+	}
+	type root struct {
+		Package []pkg `toml:"package"`
+	}
+	input := []byte(`
+[[package]]
+name = "a"
+dependencies = [
+  "x",
+  "y",
+]
+version = "1.0"
+
+[[package]]
+name = "b"
+dependencies = ["z"]
+version = "2.0"
+`)
+	var dst root
+	if err := Unmarshal(input, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if len(dst.Package) != 2 {
+		t.Fatalf("len = %d", len(dst.Package))
+	}
+	if dst.Package[0].Name != "a" || dst.Package[0].Version != "1.0" {
+		t.Fatalf("pkg0 = %+v", dst.Package[0])
+	}
+	if dst.Package[1].Name != "b" || dst.Package[1].Version != "2.0" {
+		t.Fatalf("pkg1 = %+v", dst.Package[1])
+	}
+}
+
+func TestFusedBindKnownDepsThenNextPackage(t *testing.T) {
+	t.Parallel()
+	type pkg struct {
+		Name         string
+		Dependencies []string
+	}
+	type root struct {
+		Package []pkg `toml:"package"`
+	}
+	input := []byte(`
+[[package]]
+name = "a"
+dependencies = [
+  "x",
+  'y',
+]
+
+[[package]]
+name = "b"
+dependencies = []
+`)
+	var dst root
+	if err := Unmarshal(input, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if len(dst.Package) != 2 {
+		t.Fatalf("len = %d", len(dst.Package))
+	}
+	if got := dst.Package[0].Dependencies; len(got) != 2 || got[0] != "x" || got[1] != "y" {
+		t.Fatalf("deps0 = %#v", got)
+	}
+	if dst.Package[1].Name != "b" || len(dst.Package[1].Dependencies) != 0 {
+		t.Fatalf("pkg1 = %+v", dst.Package[1])
+	}
+}
+
+func TestFusedBindStringSliceTypeMismatch(t *testing.T) {
+	t.Parallel()
+	type pkg struct {
+		Dependencies []string
+	}
+	type root struct {
+		Package []pkg `toml:"package"`
+	}
+	// Integer element cannot bind into []string; fused path must error, not corrupt.
+	input := []byte(`
+[[package]]
+dependencies = ["ok", 1]
+`)
+	var dst root
+	err := Unmarshal(input, &dst)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var mismatch *TypeMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("err = %T(%v)", err, err)
+	}
+}
