@@ -1406,6 +1406,7 @@ func appendDirectSliceElement(slot reflect.Value, capacityHint int) (elem reflec
 	}
 	slot.SetLen(index + 1)
 	elem = slot.Index(index)
+	// Clear stale fields when reusing pre-allocated capacity (len < cap).
 	elem.SetZero()
 	return directWritableValue(elem), index
 }
