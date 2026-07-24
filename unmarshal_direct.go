@@ -416,9 +416,9 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		return dec.syntaxError("expected array", i)
 	}
 	i++
-	// Cap 4 matches cargo.lock median; setDirectStringSlice stores the header
-	// without reflect.ValueOf([]T) eface allocation.
-	out := make([]string, 0, 4)
+	// Capacity hint from a cheap span peek (no second string scan). setDirectStringSlice
+	// stores the header without reflect.ValueOf([]T) eface allocation.
+	out := make([]string, 0, simpleStringArrayCapHint(buf, start))
 	for i < len(buf) {
 		for i < len(buf) {
 			c := buf[i]
@@ -478,6 +478,42 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		i = end
 	}
 	return dec.syntaxError("unterminated array", start)
+}
+
+// simpleStringArrayCapHint estimates element count for a top-level string array
+// starting at open ('['). Uses only IndexByte/Count — never re-scans string bodies.
+// Nested arrays fall back to 4. Over-estimates (trailing commas) are harmless.
+func simpleStringArrayCapHint(buf []byte, open int) int {
+	if open >= len(buf) || buf[open] != '[' {
+		return 4
+	}
+	rel := bytes.IndexByte(buf[open+1:], ']')
+	if rel < 0 {
+		return 4
+	}
+	region := buf[open+1 : open+1+rel]
+	if bytes.IndexByte(region, '[') >= 0 {
+		return 4 // nested: leave grow to append
+	}
+	// Empty / whitespace-only.
+	onlyWS := true
+	for _, c := range region {
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			onlyWS = false
+			break
+		}
+	}
+	if onlyWS {
+		return 0
+	}
+	n := bytes.Count(region, []byte{','}) + 1
+	if n > 256 {
+		return 256
+	}
+	if n < 1 {
+		return 4
+	}
+	return n
 }
 
 // setDirectStringSlice assigns s into a settable []string field without the
