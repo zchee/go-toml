@@ -200,8 +200,6 @@ func directTypeContainsMap(t reflect.Type, seen map[reflect.Type]bool) (bool, er
 	}
 }
 
-
-
 // skipSimpleStringArrayValue advances past a top-level value that is a
 // single-line or multi-line array of basic/literal strings only:
 //
@@ -275,6 +273,16 @@ func skipSimpleStringArrayValue(dec *Decoder) (bool, error) {
 	return false, dec.syntaxError("unterminated array", dec.off)
 }
 
+// commitFusedHeader consumes a fused [table] / [[array-table]] header ending
+// at end and resets statement state for the following line.
+func commitFusedHeader(dec *Decoder, end int) {
+	dec.off = end
+	dec.atLineStart = false
+	dec.expectingValue = false
+	dec.valueNoNewline = false
+	dec.needSeparator = false
+	dec.needLineEnd = true
+}
 
 // tryBindArrayOrTableHeader handles [[name]] / [name] at line start for bare
 // single-segment headers without going through readToken.
@@ -325,14 +333,6 @@ func tryBindArrayOrTableHeader(
 		i++
 	}
 
-	header := buf[start:i]
-	dec.off = i
-	dec.atLineStart = false
-	dec.expectingValue = false
-	dec.valueNoNewline = false
-	dec.needSeparator = false
-	dec.needLineEnd = true
-
 	if !array {
 		var path directRawPath
 		path.append(key)
@@ -342,15 +342,19 @@ func tryBindArrayOrTableHeader(
 			return false, err
 		}
 		if !next.IsValid() {
+			// Unknown table: decline with dec untouched so the token path
+			// consumes the header and invalidates the current table, exactly
+			// like the non-fused route.
 			path.releaseExtra()
-			return true, nil
+			return false, nil
 		}
-		*current = next
 		info, err := directStructInfo(next)
 		if err != nil {
 			path.releaseExtra()
 			return false, err
 		}
+		commitFusedHeader(dec, i)
+		*current = next
 		*currentInfo = info
 		*currentDirect = directTypeInfoOrNil(next)
 		currentPath.raw.releaseExtra()
@@ -361,7 +365,24 @@ func tryBindArrayOrTableHeader(
 		return true, nil
 	}
 
+	slot, err := directFieldRaw(root, key)
+	if errors.Is(err, errDirectUnknownField) {
+		// Unknown array table: decline with dec untouched (see above).
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	slot = directWritableValue(slot)
+	if slot.Kind() != reflect.Slice {
+		// Non-slice target is a bind error; decline so the token path
+		// reports it with full path context.
+		return false, nil
+	}
+	commitFusedHeader(dec, i)
+
 	// Capacity hint: count matching headers once per distinct bare name.
+	header := buf[start:i]
 	hint := 0
 	if *arrayHintKey != nil && bytes.Equal(key, *arrayHintKey) {
 		hint = *arrayHintCount
@@ -372,18 +393,6 @@ func tryBindArrayOrTableHeader(
 	} else {
 		// Rare second array-table name in one document.
 		hint = bytes.Count(data, header)
-	}
-
-	slot, err := directFieldRaw(root, key)
-	if errors.Is(err, errDirectUnknownField) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	slot = directWritableValue(slot)
-	if slot.Kind() != reflect.Slice {
-		return false, mismatch(slot.Type(), []any{})
 	}
 	elem, index := appendDirectSliceElement(slot, hint)
 
@@ -404,7 +413,6 @@ func tryBindArrayOrTableHeader(
 	currentPath.arrayIndex = index
 	return true, nil
 }
-
 
 // bindFusedStringArray decodes a simple string array value starting at '['.
 // It is the bind counterpart of skipSimpleStringArrayValue.
@@ -506,14 +514,7 @@ func simpleStringArrayCapHint(buf []byte, open int) int {
 	if onlyWS {
 		return 0
 	}
-	n := bytes.Count(region, []byte{','}) + 1
-	if n > 256 {
-		return 256
-	}
-	if n < 1 {
-		return 4
-	}
-	return n
+	return min(bytes.Count(region, []byte{','})+1, 256)
 }
 
 // setDirectStringSlice assigns s into a settable []string field without the
@@ -1875,7 +1876,6 @@ func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		return mismatch(dst.Type(), []any{})
 	}
 }
-
 
 func directBindStringSlice(dec *Decoder, dst reflect.Value, cfg bindConfig) error {
 	out := make([]string, 0, 4)

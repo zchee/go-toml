@@ -381,3 +381,39 @@ dependencies = ["ok", 1]
 		t.Fatalf("err = %T(%v)", err, err)
 	}
 }
+
+func TestFusedBindUnknownTableKeysIgnored(t *testing.T) {
+	t.Parallel()
+	type known struct {
+		Y int `toml:"y"`
+	}
+	type cfg struct {
+		X     int   `toml:"x"`
+		Known known `toml:"known"`
+	}
+	tests := map[string]struct {
+		input string
+	}{
+		"unknown table": {
+			input: "x = 1\n\n[unknown]\nx = 5\n\n[known]\ny = 2\n",
+		},
+		"unknown array table": {
+			input: "x = 1\n\n[[unknown]]\nx = 5\n\n[known]\ny = 2\n",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var dst cfg
+			if err := Unmarshal([]byte(tt.input), &dst); err != nil {
+				t.Fatal(err)
+			}
+			if dst.X != 1 {
+				t.Fatalf("x = %d, want 1 (keys under the unknown table must be ignored)", dst.X)
+			}
+			if dst.Known.Y != 2 {
+				t.Fatalf("known.y = %d, want 2", dst.Known.Y)
+			}
+		})
+	}
+}
