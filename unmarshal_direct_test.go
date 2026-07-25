@@ -1,3 +1,17 @@
+// Copyright 2026 The go-toml Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package toml
 
 import (
@@ -5,7 +19,7 @@ import (
 	"testing"
 )
 
-func TestFusedBindSimpleAssignment(t *testing.T) {
+func TestDirectBindSimpleAssignment(t *testing.T) {
 	t.Parallel()
 	type cfg struct {
 		Name    string
@@ -30,7 +44,7 @@ skipped = "ignored"
 	}
 }
 
-func TestFusedBindSkipsUnknownStringArray(t *testing.T) {
+func TestDirectBindSkipsUnknownStringArray(t *testing.T) {
 	t.Parallel()
 	type pkg struct {
 		Name string
@@ -59,7 +73,7 @@ name = "b"
 	}
 }
 
-func TestFusedBindStringSliceArray(t *testing.T) {
+func TestDirectBindStringSliceArray(t *testing.T) {
 	t.Parallel()
 	type pkg struct {
 		Name         string
@@ -88,7 +102,7 @@ dependencies = [
 	}
 }
 
-func TestFusedBindFallbackDoesNotCorruptState(t *testing.T) {
+func TestDirectBindFallbackDoesNotCorruptState(t *testing.T) {
 	t.Parallel()
 	// Dotted key must fall back cleanly then still decode subsequent simple keys.
 	type nested struct {
@@ -111,7 +125,7 @@ name = "ok"
 	}
 }
 
-func TestFusedBindArrayTableHeader(t *testing.T) {
+func TestDirectBindArrayTableHeader(t *testing.T) {
 	t.Parallel()
 	type item struct {
 		N int
@@ -134,7 +148,7 @@ n = 2
 	}
 }
 
-func TestFusedBindMismatchPath(t *testing.T) {
+func TestDirectBindMismatchPath(t *testing.T) {
 	t.Parallel()
 	type item struct {
 		Count int
@@ -159,7 +173,7 @@ count = "bad"
 	}
 }
 
-func TestFusedBindStringSliceEmptyAndTrailingComma(t *testing.T) {
+func TestDirectBindStringSliceEmptyAndTrailingComma(t *testing.T) {
 	t.Parallel()
 	type cfg struct {
 		Deps []string `toml:"deps"`
@@ -194,7 +208,7 @@ name = "e"
 	}
 }
 
-func TestFusedBindStringSliceWithComments(t *testing.T) {
+func TestDirectBindStringSliceWithComments(t *testing.T) {
 	t.Parallel()
 	type cfg struct {
 		Deps []string `toml:"deps"`
@@ -222,7 +236,7 @@ next = 9
 	}
 }
 
-func TestFusedBindStringSliceComplexFallback(t *testing.T) {
+func TestDirectBindStringSliceComplexFallback(t *testing.T) {
 	t.Parallel()
 	// Non-string element forces generic array binder; subsequent keys must still work.
 	type cfg struct {
@@ -242,7 +256,7 @@ name = "ok"
 	}
 }
 
-func TestFusedBindStringSliceMixedElementFallback(t *testing.T) {
+func TestDirectBindStringSliceMixedElementFallback(t *testing.T) {
 	t.Parallel()
 	// []any with a non-string forces reset-to-'[' generic bind.
 	type cfg struct {
@@ -265,7 +279,7 @@ name = "ok"
 	}
 }
 
-func TestFusedBindQuotedKeyFallback(t *testing.T) {
+func TestDirectBindQuotedKeyFallback(t *testing.T) {
 	t.Parallel()
 	type cfg struct {
 		Name  string `toml:"my-name"`
@@ -284,7 +298,7 @@ count = 3
 	}
 }
 
-func TestFusedBindUnknownArrayThenKnownFields(t *testing.T) {
+func TestDirectBindUnknownArrayThenKnownFields(t *testing.T) {
 	t.Parallel()
 	type pkg struct {
 		Name    string
@@ -322,7 +336,7 @@ version = "2.0"
 	}
 }
 
-func TestFusedBindKnownDepsThenNextPackage(t *testing.T) {
+func TestDirectBindKnownDepsThenNextPackage(t *testing.T) {
 	t.Parallel()
 	type pkg struct {
 		Name         string
@@ -358,7 +372,7 @@ dependencies = []
 	}
 }
 
-func TestFusedBindStringSliceTypeMismatch(t *testing.T) {
+func TestDirectBindStringSliceTypeMismatch(t *testing.T) {
 	t.Parallel()
 	type pkg struct {
 		Dependencies []string
@@ -366,7 +380,7 @@ func TestFusedBindStringSliceTypeMismatch(t *testing.T) {
 	type root struct {
 		Package []pkg `toml:"package"`
 	}
-	// Integer element cannot bind into []string; fused path must error, not corrupt.
+	// Integer element cannot bind into []string; direct path must error, not corrupt.
 	input := []byte(`
 [[package]]
 dependencies = ["ok", 1]
@@ -382,7 +396,7 @@ dependencies = ["ok", 1]
 	}
 }
 
-func TestFusedBindUnknownTableKeysIgnored(t *testing.T) {
+func TestDirectBindUnknownTableKeysIgnored(t *testing.T) {
 	t.Parallel()
 	type known struct {
 		Y int `toml:"y"`
