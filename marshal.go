@@ -70,11 +70,28 @@ func Marshal(v any) ([]byte, error) {
 	return marshalWithOptions(v, MarshalOptions{})
 }
 
+// AppendMarshal appends the TOML encoding of v to dst and returns the extended
+// buffer. Prefer this over Marshal when reusing a buffer across encodes to
+// avoid allocating a fresh backing array every call.
+func AppendMarshal(dst []byte, v any) ([]byte, error) {
+	return appendMarshalWithOptions(dst, v, MarshalOptions{})
+}
+
 func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
+	return appendMarshalWithOptions(nil, v, opts)
+}
+
+func appendMarshalWithOptions(dst []byte, v any, opts MarshalOptions) ([]byte, error) {
 	hint := marshalSizeHint(v)
-	// Single allocation sized to the hint; returned bytes are exclusively
-	// owned by the caller (no pool, no copy-on-return).
-	buf := bytes.NewBuffer(make([]byte, 0, hint))
+	if hint > 0 {
+		need := len(dst) + hint
+		if cap(dst) < need {
+			grown := make([]byte, len(dst), need)
+			copy(grown, dst)
+			dst = grown
+		}
+	}
+	buf := bytes.NewBuffer(dst)
 	if err := marshalToBufferDirect(buf, v, opts); err != nil {
 		return nil, err
 	}
@@ -1037,18 +1054,33 @@ func estimateReflectMapMarshalSize(v reflect.Value, depth int) int {
 	return size
 }
 
+// structMarshalNameBytes caches sum of TOML field name lengths per struct type
+// so size hints do not re-sum names on every encode.
+var structMarshalNameBytes sync.Map // reflect.Type -> int
+
 func estimateReflectStructMarshalSize(v reflect.Value, depth int) int {
-	info, err := reflectcache.Lookup(v.Type())
+	t := v.Type()
+	info, err := reflectcache.Lookup(t)
 	if err != nil {
 		return v.NumField() * 32
 	}
-	size := len(info.MarshalFields) * 6
+	nameBytes := 0
+	if cached, ok := structMarshalNameBytes.Load(t); ok {
+		nameBytes = cached.(int)
+	} else {
+		for _, field := range info.MarshalFields {
+			nameBytes += len(field.Name)
+		}
+		structMarshalNameBytes.Store(t, nameBytes)
+	}
+	// Per-field " = \n" overhead (~6) plus field names, then walk values.
+	size := nameBytes + len(info.MarshalFields)*6
 	for _, field := range info.MarshalFields {
 		fv, ok := marshalFieldValue(v, field)
 		if !ok {
 			continue
 		}
-		size += len(field.Name) + estimateReflectMarshalSize(fv, depth+1)
+		size += estimateReflectMarshalSize(fv, depth+1)
 	}
 	return size
 }
