@@ -277,3 +277,27 @@ type errorReader struct {
 func (r errorReader) Read([]byte) (int, error) {
 	return 0, r.err
 }
+
+func TestDecoderDeepNestedMismatchedCloser(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		input string
+	}{
+		"array closer over spilled inline table": {
+			input: "x = " + strings.Repeat("[", 16) + "{a=]",
+		},
+		"inline closer over spilled array": {
+			input: "x = " + strings.Repeat("[", 15) + "{b=[}",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var m map[string]any
+			if err := Unmarshal([]byte(tt.input), &m); err == nil {
+				t.Fatalf("Unmarshal(%q) = nil error, want syntax error", tt.input)
+			}
+		})
+	}
+}
