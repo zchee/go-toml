@@ -131,16 +131,16 @@ type Decoder struct {
 	needLineEnd    bool
 	atLineStart    bool
 
-	limits         Limits
-	arrayDepth     int
-	inlineDepth    int
+	limits      Limits
+	arrayDepth  int
+	inlineDepth int
 	// containerStack holds nested array/inline markers. The inline array
 	// avoids heap growth for the shallow nesting common in configs; depth
 	// beyond the inline capacity spills to containerExtra.
-	containerStack  [16]byte
-	containerDepth  int
-	containerExtra  []byte
-	localAsUTC      bool
+	containerStack [16]byte
+	containerDepth int
+	containerExtra []byte
+	localAsUTC     bool
 	copyStrings    bool
 	tokenLine      int
 	tokenCol       int
@@ -180,26 +180,27 @@ func (d *Decoder) pushContainer(c byte) {
 	d.containerDepth = n + 1
 }
 
-func (d *Decoder) popContainer(want byte) bool {
+// popContainer pops the innermost container only when it matches want. A
+// mismatched closer must leave depth and spill storage untouched so the
+// caller's syntax-error handling still sees a consistent stack.
+func (d *Decoder) popContainer(want byte) {
 	n := d.containerDepth
 	if n == 0 {
-		return false
+		return
 	}
-	var top byte
 	if n <= len(d.containerStack) {
-		top = d.containerStack[n-1]
+		if d.containerStack[n-1] != want {
+			return
+		}
 	} else {
-		top = d.containerExtra[n-1-len(d.containerStack)]
-		d.containerExtra = d.containerExtra[:n-1-len(d.containerStack)]
-	}
-	if top != want {
-		return false
+		idx := n - 1 - len(d.containerStack)
+		if d.containerExtra[idx] != want {
+			return
+		}
+		d.containerExtra = d.containerExtra[:idx]
 	}
 	d.containerDepth = n - 1
-	return true
 }
-
-func (d *Decoder) containerLen() int { return d.containerDepth }
 
 // NewDecoder creates a Decoder over an io.Reader input.
 func NewDecoder(r io.Reader, opts ...Option) *Decoder {
@@ -769,7 +770,7 @@ func (d *Decoder) scanArrayEnd() (rawToken, error) {
 	if d.arrayDepth > 0 {
 		d.arrayDepth--
 	}
-	_ = d.popContainer(containerArray)
+	d.popContainer(containerArray)
 	d.expectingValue = d.innermostIsArray()
 	d.valueNoNewline = false
 	d.needSeparator = d.containerDepth > 0
@@ -796,7 +797,7 @@ func (d *Decoder) scanInlineTableEnd() (rawToken, error) {
 	if d.inlineDepth > 0 {
 		d.inlineDepth--
 	}
-	_ = d.popContainer(containerInline)
+	d.popContainer(containerInline)
 	d.expectingValue = d.innermostIsArray()
 	d.valueNoNewline = false
 	d.needSeparator = d.containerDepth > 0
@@ -1133,8 +1134,6 @@ func (d *Decoder) computeLineCol(off int) (line, col int) {
 	return lineColForOffset(d.buf, off)
 }
 
-
-
 func (d *Decoder) makeToken(kind TokenKind, raw []byte, offset int, scalar tokenScalar) rawToken {
 	return d.makeTokenFlags(kind, raw, offset, scalar, 0)
 }
@@ -1146,6 +1145,7 @@ func (d *Decoder) makeTokenFlags(kind TokenKind, raw []byte, offset int, scalar 
 	}
 	return rawToken{Kind: kind, Bytes: raw, Offset: offset, flags: flags}
 }
+
 func lineColForOffset(data []byte, off int) (line, col int) {
 	if off < 0 {
 		off = 0
@@ -1184,26 +1184,6 @@ func (d *Decoder) advanceBytes(raw []byte) {
 	}
 	if d.trackTokenPositions {
 		d.advancePosition(raw)
-	}
-	d.off += n
-	d.atLineStart = false
-}
-
-// advanceN advances the cursor by n bytes without building a subslice when
-// token positions are not tracked (the direct-bind hot path).
-func (d *Decoder) advanceN(n int) {
-	if n <= 0 {
-		return
-	}
-	if d.trackTokenPositions {
-		end := d.off + n
-		if end > len(d.buf) {
-			end = len(d.buf)
-		}
-		d.advancePosition(d.buf[d.off:end])
-		d.off = end
-		d.atLineStart = false
-		return
 	}
 	d.off += n
 	d.atLineStart = false
