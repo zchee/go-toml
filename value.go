@@ -179,7 +179,8 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 				// error is a duplicate key, a *SyntaxError that bindErrorPath leaves
 				// untouched, so no path string is needed either. fullPath is built
 				// lazily only when the value opens an inline-table/array scope.
-				name := string(tok.Bytes)
+				// Alias input for bare keys (same contract as arena string values).
+				name := unsafeString(tok.Bytes)
 				value, err := parseNextValue(dec)
 				if err != nil {
 					return nil, err
@@ -579,7 +580,7 @@ func parseValueToken(dec *Decoder, tok Token) (any, error) {
 func parseRawValueToken(dec *Decoder, tok rawToken) (any, error) {
 	switch tok.Kind {
 	case TokenKindValueString:
-		return parseStringValue(tok.Bytes)
+		return parseStringValueToken(dec, tok)
 	case TokenKindValueInteger:
 		return rawTokenIntegerValue(dec, tok)
 	case TokenKindValueFloat:
@@ -736,6 +737,20 @@ func parseStringValue(raw []byte) (string, error) {
 	default:
 		return "", malformedStringError(raw)
 	}
+}
+
+
+// parseStringValueToken prefers zero-copy aliasing when the tokenizer marked
+// the body escape-free and the decoder is not copying strings.
+func parseStringValueToken(dec *Decoder, tok rawToken) (string, error) {
+	raw := tok.Bytes
+	if dec != nil && !dec.copyStrings && tok.flags&tokenFlagStringBodyOK != 0 {
+		body := readyStringBody(raw)
+		if s, ok := dec.arenaString(body); ok {
+			return s, nil
+		}
+	}
+	return parseStringValue(raw)
 }
 
 func validateStringValue(raw []byte) error {
@@ -1483,6 +1498,7 @@ func newDocumentMap() documentMap {
 	clear(m)
 	return m
 }
+
 
 func recycleDocument(v any) {
 	switch x := v.(type) {
