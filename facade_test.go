@@ -956,6 +956,41 @@ func TestMarshalSizeHintPositiveAndBounded(t *testing.T) {
 	}
 }
 
+func TestAppendMarshal(t *testing.T) {
+	t.Parallel()
+	type cfg struct {
+		Name  string
+		Count int
+	}
+	value := cfg{Name: "demo", Count: 3}
+	body, err := Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := []byte("prefix:")
+	got, err := AppendMarshal(append([]byte(nil), prefix...), value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(got, prefix) {
+		t.Fatalf("missing prefix: %q", got)
+	}
+	if !bytes.Equal(got[len(prefix):], body) {
+		t.Fatalf("appended body = %q, want %q", got[len(prefix):], body)
+	}
+	// Reuse capacity: second append should not require a larger slice when
+	// the buffer already has spare room sized by the first encode.
+	buf := make([]byte, 0, len(prefix)+len(body)+8)
+	buf = append(buf, prefix...)
+	out, err := AppendMarshal(buf, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap(out) < cap(buf) {
+		t.Fatalf("cap shrunk: %d -> %d", cap(buf), cap(out))
+	}
+}
+
 type customFacade struct{ decoded bool }
 
 type customText string
