@@ -48,12 +48,14 @@ const (
 	quoteFallback = -2
 )
 
-var stringKeysPool sync.Pool
-var marshalBufferPool = sync.Pool{
-	New: func() any {
-		return new(bytes.Buffer)
-	},
-}
+var (
+	stringKeysPool    sync.Pool
+	marshalBufferPool = sync.Pool{
+		New: func() any {
+			return new(bytes.Buffer)
+		},
+	}
+)
 
 func init() {
 	reflectcache.EncodeFieldFallback = encodeReflectcacheField
