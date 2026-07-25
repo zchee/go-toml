@@ -739,7 +739,6 @@ func parseStringValue(raw []byte) (string, error) {
 	}
 }
 
-
 // parseStringValueToken prefers zero-copy aliasing when the tokenizer marked
 // the body escape-free and the decoder is not copying strings.
 func parseStringValueToken(dec *Decoder, tok rawToken) (string, error) {
@@ -1498,7 +1497,6 @@ func newDocumentMap() documentMap {
 	clear(m)
 	return m
 }
-
 
 func recycleDocument(v any) {
 	switch x := v.(type) {
