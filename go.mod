@@ -1,9 +1,9 @@
 module github.com/zchee/go-toml
 
-go 1.26
+go 1.27
 
 require (
-	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68
+	github.com/go-json-experiment/json v0.0.0-20260820222146-c27c302e5fc3
 	github.com/google/go-cmp v0.7.0
 )
 

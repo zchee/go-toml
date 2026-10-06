@@ -137,7 +137,7 @@ func scanBareKeyAVX2(s []byte) int {
 	un := archsimd.BroadcastUint8x32('_')
 	hy := archsimd.BroadcastUint8x32('-')
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		isU := v.GreaterEqual(upA).And(v.LessEqual(upZ))
 		isL := v.GreaterEqual(loA).And(v.LessEqual(loZ))
 		isD := v.GreaterEqual(d0).And(v.LessEqual(d9))
@@ -156,7 +156,7 @@ func scanBasicStringAVX2(s []byte) int {
 	quote := archsimd.BroadcastUint8x32('"')
 	bksl := archsimd.BroadcastUint8x32('\\')
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		m := v.Equal(quote).Or(v.Equal(bksl))
 		if b := m.ToBits(); b != 0 {
 			return i + bits.TrailingZeros32(b)
@@ -173,7 +173,7 @@ func scanBasicStringEscapeAVX2(s []byte) int {
 	control := archsimd.BroadcastUint8x32(0x1f)
 	high := archsimd.BroadcastUint8x32(0x80)
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.LessEqual(control)).Or(v.GreaterEqual(high))
 		if b := m.ToBits(); b != 0 {
 			return i + bits.TrailingZeros32(b)
@@ -190,7 +190,7 @@ func scanBasicStringStrictAVX2(s []byte) int {
 	del := archsimd.BroadcastUint8x32(0x7f)
 	control := archsimd.BroadcastUint8x32(0x1f)
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.Equal(del)).Or(v.LessEqual(control))
 		if m.ToBits() != 0 {
 			if n := scanBasicStringStrictScalar(s[i : i+32]); n < 32 {
@@ -207,7 +207,7 @@ func scanCommentBodyAVX2(s []byte) int {
 	del := archsimd.BroadcastUint8x32(0x7f)
 	control := archsimd.BroadcastUint8x32(0x1f)
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		m := v.Equal(del).Or(v.LessEqual(control))
 		if m.ToBits() != 0 {
 			if n := scanCommentBodyScalar(s[i : i+32]); n < 32 {
@@ -231,7 +231,7 @@ func scanBareValueEndAVX2(s []byte) int {
 	hash := archsimd.BroadcastUint8x32('#')
 	eq := archsimd.BroadcastUint8x32('=')
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		m := v.Equal(sp).Or(v.Equal(tab)).Or(v.Equal(cr)).Or(v.Equal(lf)).
 			Or(v.Equal(comma)).Or(v.Equal(rbracket)).Or(v.Equal(rbrace)).Or(v.Equal(hash)).Or(v.Equal(eq))
 		if b := m.ToBits(); b != 0 {
@@ -247,7 +247,7 @@ func countLinesAVX2(s []byte) int {
 	n := 0
 	lf := archsimd.BroadcastUint8x32('\n')
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		n += bits.OnesCount32(v.Equal(lf).ToBits())
 		i += 32
 	}
@@ -264,7 +264,7 @@ func skipWhitespaceAVX2(s []byte) int {
 	sp := archsimd.BroadcastUint8x32(' ')
 	tab := archsimd.BroadcastUint8x32('\t')
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		m := v.Equal(sp).Or(v.Equal(tab))
 		b := m.ToBits()
 		if b != 0xFFFFFFFF {
@@ -292,7 +292,7 @@ func validateUTF8ASCIIAVX2(s []byte) int {
 	i := 0
 	hi := archsimd.BroadcastUint8x32(0x80)
 	for i+32 <= len(s) {
-		v := archsimd.LoadUint8x32Slice(s[i:])
+		v := archsimd.LoadUint8x32(s[i:])
 		m := v.GreaterEqual(hi)
 		if m.ToBits() == 0 {
 			i += 32
@@ -314,7 +314,7 @@ func scanBareKeySSE2(s []byte) int {
 	un := archsimd.BroadcastUint8x16('_')
 	hy := archsimd.BroadcastUint8x16('-')
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		isU := v.GreaterEqual(upA).And(v.LessEqual(upZ))
 		isL := v.GreaterEqual(loA).And(v.LessEqual(loZ))
 		isD := v.GreaterEqual(d0).And(v.LessEqual(d9))
@@ -344,7 +344,7 @@ func scanBasicStringSSE2(s []byte) int {
 	quote := archsimd.BroadcastUint8x16('"')
 	bksl := archsimd.BroadcastUint8x16('\\')
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(quote).Or(v.Equal(bksl))
 		if b := m.ToBits(); b != 0 {
 			return i + bits.TrailingZeros16(b)
@@ -366,7 +366,7 @@ func scanBasicStringEscapeSSE2(s []byte) int {
 	control := archsimd.BroadcastUint8x16(0x1f)
 	high := archsimd.BroadcastUint8x16(0x80)
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.LessEqual(control)).Or(v.GreaterEqual(high))
 		if b := m.ToBits(); b != 0 {
 			return i + bits.TrailingZeros16(b)
@@ -383,7 +383,7 @@ func scanBasicStringStrictSSE2(s []byte) int {
 	del := archsimd.BroadcastUint8x16(0x7f)
 	control := archsimd.BroadcastUint8x16(0x1f)
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.Equal(del)).Or(v.LessEqual(control))
 		if m.ToBits() != 0 {
 			if n := scanBasicStringStrictScalar(s[i : i+16]); n < 16 {
@@ -400,7 +400,7 @@ func scanCommentBodySSE2(s []byte) int {
 	del := archsimd.BroadcastUint8x16(0x7f)
 	control := archsimd.BroadcastUint8x16(0x1f)
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(del).Or(v.LessEqual(control))
 		if m.ToBits() != 0 {
 			if n := scanCommentBodyScalar(s[i : i+16]); n < 16 {
@@ -424,7 +424,7 @@ func scanBareValueEndSSE2(s []byte) int {
 	hash := archsimd.BroadcastUint8x16('#')
 	eq := archsimd.BroadcastUint8x16('=')
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(sp).Or(v.Equal(tab)).Or(v.Equal(cr)).Or(v.Equal(lf)).
 			Or(v.Equal(comma)).Or(v.Equal(rbracket)).Or(v.Equal(rbrace)).Or(v.Equal(hash)).Or(v.Equal(eq))
 		if b := m.ToBits(); b != 0 {
@@ -440,7 +440,7 @@ func countLinesSSE2(s []byte) int {
 	n := 0
 	lf := archsimd.BroadcastUint8x16('\n')
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		n += bits.OnesCount16(v.Equal(lf).ToBits())
 		i += 16
 	}
@@ -457,7 +457,7 @@ func skipWhitespaceSSE2(s []byte) int {
 	sp := archsimd.BroadcastUint8x16(' ')
 	tab := archsimd.BroadcastUint8x16('\t')
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(sp).Or(v.Equal(tab))
 		b := m.ToBits()
 		if b != 0xFFFF {
@@ -490,7 +490,7 @@ func validateUTF8ASCIISSE2(s []byte) int {
 	i := 0
 	hi := archsimd.BroadcastUint8x16(0x80)
 	for i+16 <= len(s) {
-		v := archsimd.LoadUint8x16Slice(s[i:])
+		v := archsimd.LoadUint8x16(s[i:])
 		m := v.GreaterEqual(hi)
 		if m.ToBits() == 0 {
 			i += 16
