@@ -25,10 +25,24 @@ import (
 )
 
 type benchPackage struct {
+	Name         string
+	Version      string
+	Source       string
+	Checksum     string
+	Dependencies []string `toml:"dependencies"`
+}
+
+// benchPackageCore omits dependencies so we can measure skip-vs-bind separately.
+type benchPackageCore struct {
 	Name     string
 	Version  string
 	Source   string
 	Checksum string
+}
+
+type benchCargoCore struct {
+	Version int                `toml:"version"`
+	Package []benchPackageCore `toml:"package"`
 }
 
 type benchCargo struct {
@@ -103,6 +117,21 @@ func BenchmarkUnmarshal_GoTOML(b *testing.B) {
 			b.Fatal(err)
 		}
 		benchCargoSink = dst
+	}
+}
+
+var benchCargoCoreSink benchCargoCore
+
+// BenchmarkUnmarshal_GoTOML_CoreFields skips dependencies arrays (unknown fields).
+func BenchmarkUnmarshal_GoTOML_CoreFields(b *testing.B) {
+	b.ReportAllocs()
+	b.SetBytes(int64(len(benchCargoLock)))
+	for b.Loop() {
+		var dst benchCargoCore
+		if err := simdtoml.Unmarshal(benchCargoLock, &dst); err != nil {
+			b.Fatal(err)
+		}
+		benchCargoCoreSink = dst
 	}
 }
 

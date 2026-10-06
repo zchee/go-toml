@@ -27,11 +27,53 @@ import (
 	"unsafe"
 
 	"github.com/zchee/go-toml/internal/reflectcache"
+	"github.com/zchee/go-toml/internal/scan"
 )
 
 var errDirectUnknownField = errors.New("toml: direct destination field is unknown")
 
 var directStructEligibilityCache sync.Map // map[reflect.Type]bool
+
+// directTypeInfo caches per-field directValueKind alongside reflectcache.TypeInfo
+// so hot-path key binds avoid re-deriving kinds from reflect.Type.
+type directTypeInfo struct {
+	info  *reflectcache.TypeInfo
+	kinds []directValueKind
+}
+
+var directTypeInfoCache sync.Map // map[reflect.Type]*directTypeInfo
+
+func directTypeInfoOrNil(v reflect.Value) *directTypeInfo {
+	v = directWritableValue(v)
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return nil
+	}
+	dt, err := lookupDirectTypeInfo(v.Type())
+	if err != nil {
+		return nil
+	}
+	return dt
+}
+
+func lookupDirectTypeInfo(t reflect.Type) (*directTypeInfo, error) {
+	if v, ok := directTypeInfoCache.Load(t); ok {
+		return v.(*directTypeInfo), nil
+	}
+	info, err := reflectcache.Lookup(t)
+	if err != nil {
+		return nil, err
+	}
+	kinds := make([]directValueKind, len(info.Fields))
+	for i := range info.Fields {
+		kinds[i] = directValueKindOfType(info.Fields[i].Type)
+	}
+	dt := &directTypeInfo{info: info, kinds: kinds}
+	if v, loaded := directTypeInfoCache.LoadOrStore(t, dt); loaded {
+		return v.(*directTypeInfo), nil
+	}
+	return dt, nil
+}
+
 var directRawPathExtraPool = sync.Pool{
 	New: func() any {
 		return new([][]byte)
@@ -158,13 +200,478 @@ func directTypeContainsMap(t reflect.Type, seen map[reflect.Type]bool) (bool, er
 	}
 }
 
+// skipSimpleStringArrayValue advances past a top-level value that is a
+// single-line or multi-line array of basic/literal strings only:
+//
+//	dependencies = [
+//	  "foo",
+//	  "bar",
+//	]
+//
+// Nested arrays, inline tables, bare values, or trailing commas after complex
+// tokens fall through (ok=false) so the full skipper remains authoritative.
+func skipSimpleStringArrayValue(dec *Decoder) (bool, error) {
+	if dec == nil || dec.err != nil {
+		return false, nil
+	}
+	// Caller already positioned at the value start (after '=' and spaces).
+	buf := dec.buf
+	i := dec.off
+	if i >= len(buf) || buf[i] != '[' {
+		return false, nil
+	}
+	i++
+	for i < len(buf) {
+		// whitespace + newlines
+		for i < len(buf) {
+			c := buf[i]
+			if c == ' ' || c == '\t' || c == '\n' {
+				i++
+				continue
+			}
+			if c == '\r' {
+				if i+1 < len(buf) && buf[i+1] == '\n' {
+					i += 2
+					continue
+				}
+				return false, nil
+			}
+			break
+		}
+		if i >= len(buf) {
+			return false, dec.syntaxError("unterminated array", dec.off)
+		}
+		c := buf[i]
+		if c == ']' {
+			finishTopLevelArrayValue(dec, i+1)
+			return true, nil
+		}
+		if c == '#' {
+			// line comment inside array
+			for i < len(buf) && buf[i] != '\n' {
+				if buf[i] == '\r' {
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if c == ',' {
+			i++
+			continue
+		}
+		if c != '"' && c != '\'' {
+			return false, nil
+		}
+		// string element
+		end, _, _, err := dec.scanString(i)
+		if err != nil {
+			return false, err
+		}
+		i = end
+	}
+	return false, dec.syntaxError("unterminated array", dec.off)
+}
+
+// commitFusedHeader consumes a fused [table] / [[array-table]] header ending
+// at end and resets statement state for the following line.
+func commitFusedHeader(dec *Decoder, end int) {
+	dec.off = end
+	dec.atLineStart = false
+	dec.expectingValue = false
+	dec.valueNoNewline = false
+	dec.needSeparator = false
+	dec.needLineEnd = true
+}
+
+// tryBindArrayOrTableHeader handles [[name]] / [name] at line start for bare
+// single-segment headers without going through readToken.
+func tryBindArrayOrTableHeader(
+	dec *Decoder,
+	root reflect.Value,
+	current *reflect.Value,
+	currentInfo **reflectcache.TypeInfo,
+	currentDirect **directTypeInfo,
+	currentPath *directPathState,
+	data []byte,
+	arrayHintKey *[]byte,
+	arrayHintCount *int,
+) (bool, error) {
+	buf := dec.buf
+	off := dec.off
+	if off >= len(buf) || buf[off] != '[' {
+		return false, nil
+	}
+	array := off+1 < len(buf) && buf[off+1] == '['
+	start := off
+	i := off + 1
+	if array {
+		i++
+	}
+	for i < len(buf) && (buf[i] == ' ' || buf[i] == '\t') {
+		i++
+	}
+	keyStart := i
+	for i < len(buf) && isDirectBareKeyByte(buf[i]) {
+		i++
+	}
+	if i == keyStart {
+		return false, nil
+	}
+	key := buf[keyStart:i]
+	for i < len(buf) && (buf[i] == ' ' || buf[i] == '\t') {
+		i++
+	}
+	if array {
+		if i+1 >= len(buf) || buf[i] != ']' || buf[i+1] != ']' {
+			return false, nil
+		}
+		i += 2
+	} else if i >= len(buf) || buf[i] != ']' {
+		return false, nil
+	} else {
+		i++
+	}
+
+	if !array {
+		var path directRawPath
+		path.append(key)
+		next, err := directTableRaw(root, path)
+		if err != nil {
+			path.releaseExtra()
+			return false, err
+		}
+		if !next.IsValid() {
+			// Unknown table: decline with dec untouched so the token path
+			// consumes the header and invalidates the current table, exactly
+			// like the non-fused route.
+			path.releaseExtra()
+			return false, nil
+		}
+		info, err := directStructInfo(next)
+		if err != nil {
+			path.releaseExtra()
+			return false, err
+		}
+		commitFusedHeader(dec, i)
+		*current = next
+		*currentInfo = info
+		*currentDirect = directTypeInfoOrNil(next)
+		currentPath.raw.releaseExtra()
+		currentPath.raw = path
+		currentPath.valid = true
+		currentPath.text = nil
+		currentPath.arrayIndex = -1
+		return true, nil
+	}
+
+	slot, err := directFieldRaw(root, key)
+	if errors.Is(err, errDirectUnknownField) {
+		// Unknown array table: decline with dec untouched (see above).
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	slot = directWritableValue(slot)
+	if slot.Kind() != reflect.Slice {
+		// Non-slice target is a bind error; decline so the token path
+		// reports it with full path context.
+		return false, nil
+	}
+	commitFusedHeader(dec, i)
+
+	// Capacity hint: count matching headers once per distinct bare name.
+	header := buf[start:i]
+	hint := 0
+	if *arrayHintKey != nil && bytes.Equal(key, *arrayHintKey) {
+		hint = *arrayHintCount
+	} else if *arrayHintKey == nil {
+		*arrayHintKey = key
+		*arrayHintCount = bytes.Count(data, header)
+		hint = *arrayHintCount
+	} else {
+		// Rare second array-table name in one document.
+		hint = bytes.Count(data, header)
+	}
+	elem, index := appendDirectSliceElement(slot, hint)
+
+	*current = elem
+	// Element type is stable for a given array-table field; cache via type.
+	dt, err := lookupDirectTypeInfo(elem.Type())
+	if err != nil {
+		return false, normalizeReflectcacheError(err)
+	}
+	*currentInfo = dt.info
+	*currentDirect = dt
+	currentPath.raw.releaseExtra()
+	var path directRawPath
+	path.append(key)
+	currentPath.raw = path
+	currentPath.valid = true
+	currentPath.text = nil
+	currentPath.arrayIndex = index
+	return true, nil
+}
+
+// bindFusedStringArray decodes a simple string array value starting at '['.
+// It is the bind counterpart of skipSimpleStringArrayValue.
+func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error {
+	buf := dec.buf
+	start := dec.off
+	i := start
+	if i >= len(buf) || buf[i] != '[' {
+		return dec.syntaxError("expected array", i)
+	}
+	i++
+	// Capacity hint from a cheap span peek (no second string scan). setDirectStringSlice
+	// stores the header without reflect.ValueOf([]T) eface allocation.
+	out := make([]string, 0, simpleStringArrayCapHint(buf, start))
+	for i < len(buf) {
+		for i < len(buf) {
+			c := buf[i]
+			if c == ' ' || c == '\t' || c == '\n' {
+				i++
+				continue
+			}
+			if c == '\r' {
+				if i+1 < len(buf) && buf[i+1] == '\n' {
+					i += 2
+					continue
+				}
+				return dec.syntaxError("bare carriage return", i)
+			}
+			break
+		}
+		if i >= len(buf) {
+			return dec.syntaxError("unterminated array", start)
+		}
+		c := buf[i]
+		if c == ']' {
+			finishTopLevelArrayValue(dec, i+1)
+			setDirectStringSlice(dst, out)
+			return nil
+		}
+		if c == '#' {
+			for i < len(buf) && buf[i] != '\n' && buf[i] != '\r' {
+				i++
+			}
+			continue
+		}
+		if c == ',' {
+			i++
+			continue
+		}
+		if c != '"' && c != '\'' {
+			// Complex element: reset to '[' and use the generic array binder.
+			dec.off = start
+			dec.expectingValue = true
+			dec.valueNoNewline = true
+			tok, err := dec.scanValueToken()
+			if err != nil {
+				return err
+			}
+			return directBindTypedToken(dec, tok, dst, directValueArray, cfg)
+		}
+		end, _, flags, err := dec.scanString(i)
+		if err != nil {
+			return err
+		}
+		tok := rawToken{Kind: TokenKindValueString, Bytes: buf[i:end], Offset: i, flags: flags}
+		s, err := directStringValue(dec, tok, cfg)
+		if err != nil {
+			return err
+		}
+		out = append(out, s)
+		i = end
+	}
+	return dec.syntaxError("unterminated array", start)
+}
+
+// simpleStringArrayCapHint estimates element count for a top-level string array
+// starting at open ('['). Uses only IndexByte/Count — never re-scans string bodies.
+// Nested arrays fall back to 4. Over-estimates (trailing commas) are harmless.
+func simpleStringArrayCapHint(buf []byte, open int) int {
+	if open >= len(buf) || buf[open] != '[' {
+		return 4
+	}
+	rel := bytes.IndexByte(buf[open+1:], ']')
+	if rel < 0 {
+		return 4
+	}
+	region := buf[open+1 : open+1+rel]
+	if bytes.IndexByte(region, '[') >= 0 {
+		return 4 // nested: leave grow to append
+	}
+	// Empty / whitespace-only.
+	onlyWS := true
+	for _, c := range region {
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			onlyWS = false
+			break
+		}
+	}
+	if onlyWS {
+		return 0
+	}
+	return min(bytes.Count(region, []byte{','})+1, 256)
+}
+
+// setDirectStringSlice assigns s into a settable []string field without the
+// extra heap allocation that reflect.ValueOf([]T) performs for the eface header.
+// The slice header is written via unsafe so the local slice need not escape.
+func setDirectStringSlice(dst reflect.Value, s []string) {
+	if dst.Kind() != reflect.Slice || !dst.CanAddr() {
+		dst.Set(reflect.ValueOf(s))
+		return
+	}
+	*(*[]string)(dst.Addr().UnsafePointer()) = s
+}
+
+func finishTopLevelArrayValue(dec *Decoder, i int) {
+	buf := dec.buf
+	dec.atLineStart = false
+	dec.expectingValue = false
+	dec.valueNoNewline = false
+	dec.needSeparator = false
+	dec.needLineEnd = true
+	for i < len(buf) {
+		c := buf[i]
+		if c == ' ' || c == '\t' {
+			i++
+			continue
+		}
+		if c == '\n' {
+			dec.off = i + 1
+			dec.atLineStart = true
+			dec.needLineEnd = false
+			return
+		}
+		if c == '\r' && i+1 < len(buf) && buf[i+1] == '\n' {
+			dec.off = i + 2
+			dec.atLineStart = true
+			dec.needLineEnd = false
+			return
+		}
+		dec.off = i
+		return
+	}
+	dec.off = i
+}
+
+// tryBindSimpleAssignment attempts to decode one top-level bare-key assignment
+// without going through Decoder.readToken. Returns handled=false when the next
+// construct is not a simple assignment (headers, comments, dotted/quoted keys).
+func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directTypeInfo, cfg bindConfig, path *directPathState) (bool, error) {
+	if dec.err != nil {
+		return false, dec.err
+	}
+	dec.skipSpaces()
+	if dec.off >= len(dec.buf) {
+		return false, nil
+	}
+	buf := dec.buf
+	off := dec.off
+	b := buf[off]
+	// Only bare-key starts; headers/comments/quoted keys fall back.
+	if b == '[' || b == '#' || b == '"' || b == '\'' || b == '\r' {
+		return false, nil
+	}
+
+	n := scan.ScanBareKey(buf[off:])
+	if n == 0 {
+		return false, nil
+	}
+	keyEnd := off + n
+	eq := keyEnd
+	for eq < len(buf) {
+		c := buf[eq]
+		if c != ' ' && c != '\t' {
+			break
+		}
+		eq++
+	}
+	if eq >= len(buf) || buf[eq] != '=' {
+		// Dotted key (key.sub = ...) or incomplete — use the token path.
+		return false, nil
+	}
+
+	key := buf[off:keyEnd]
+	// Advance past key, spaces, and '='. Direct bind disables position tracking.
+	dec.off = eq + 1
+	dec.atLineStart = false
+
+	// Horizontal space before the value.
+	voff := dec.off
+	for voff < len(buf) {
+		c := buf[voff]
+		if c != ' ' && c != '\t' {
+			break
+		}
+		voff++
+	}
+	dec.off = voff
+	if voff >= len(buf) {
+		return false, dec.syntaxError("expected value", voff)
+	}
+
+	idx, ok := lookupStructFieldIndex(dt.info, key)
+	if !ok {
+		// Unknown field: skip the value. Cargo.lock-style string arrays are
+		// common (dependencies = ["a", "b"]) and get a dedicated fast skip.
+		if ok, err := skipSimpleStringArrayValue(dec); ok || err != nil {
+			return true, err
+		}
+		dec.expectingValue = true
+		dec.valueNoNewline = true
+		if err := skipNextValue(dec); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	field := &dt.info.Fields[idx]
+	dst := fieldValue(current, field.Index)
+	kind := dt.kinds[idx]
+	errName := func() string {
+		name := unsafeString(key)
+		if base := path.string(); base != "" {
+			return base + "." + name
+		}
+		return name
+	}
+
+	// Known []string (e.g. dependencies): bind without scanValueToken/ArrayStart.
+	if kind == directValueArray && dec.buf[dec.off] == '[' &&
+		dst.Kind() == reflect.Slice && dst.Type().Elem().Kind() == reflect.String {
+		if err := bindFusedStringArray(dec, dst, cfg); err != nil {
+			return false, bindErrorPath(err, errName())
+		}
+		return true, nil
+	}
+
+	// Scan the value using the existing value scanner, then bind.
+	dec.expectingValue = true
+	dec.valueNoNewline = true
+	tok, err := dec.scanValueToken()
+	if err != nil {
+		return false, err
+	}
+	if err := directBindTypedToken(dec, tok, dst, kind, cfg); err != nil {
+		return false, bindErrorPath(err, errName())
+	}
+	return true, nil
+}
+
 // bindDocumentDirect decodes the token stream directly into dst. It avoids the
 // intermediate documentMap used by generic callers while preserving the same
 // Decoder.ReadToken source of truth as the rest of the facade.
 //
 //nolint:cyclop,funlen,gocognit,gocyclo // direct-decode token dispatch with table/array bookkeeping; cohesive state machine.
 func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindConfig) error {
-	dec := NewDecoderBytes(data, decoderOptionsWithoutTokenPositions(opts)...)
+	var decStorage Decoder
+	dec := &decStorage
+	initDecoderBytes(dec, data, decoderOptionsWithoutTokenPositions(opts)...)
 	current := dst
 	currentInfo, err := directStructInfo(current)
 	if err != nil {
@@ -172,9 +679,45 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 	}
 	currentPath := directPathState{}
 	defer currentPath.raw.releaseExtra()
+	var currentDirect *directTypeInfo
+	if current.IsValid() && current.Kind() == reflect.Struct {
+		if dt, err := lookupDirectTypeInfo(current.Type()); err == nil {
+			currentDirect = dt
+			currentInfo = dt.info
+		}
+	}
+	// Single-name array-table capacity hint (cargo.lock: [[package]] only).
+	// Aliases into data — no heap allocation.
+	var arrayHintKey []byte
+	var arrayHintCount int
+
 	for {
+		// Fused path: top-level constructs without full readToken.
+		if !dec.expectingValue && dec.containerDepth == 0 {
+			dec.skipSpaces()
+			if dec.off < len(dec.buf) && dec.buf[dec.off] == '[' {
+				// [[array-table]] or [table]
+				handled, err := tryBindArrayOrTableHeader(dec, dst, &current, &currentInfo, &currentDirect, &currentPath, data, &arrayHintKey, &arrayHintCount)
+				if err != nil {
+					return err
+				}
+				if handled {
+					continue
+				}
+			}
+			if currentDirect != nil {
+				handled, err := tryBindSimpleAssignment(dec, current, currentDirect, cfg, &currentPath)
+				if err != nil {
+					return err
+				}
+				if handled {
+					continue
+				}
+			}
+		}
+
 		tok, err := dec.readToken()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF {
 			return nil
 		}
 		if err != nil {
@@ -196,6 +739,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 					path.releaseExtra()
 					return err
 				}
+				currentDirect = directTypeInfoOrNil(current)
 				currentPath.raw.releaseExtra()
 				currentPath.raw = path
 				currentPath.valid = true
@@ -216,6 +760,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 			if err != nil {
 				return err
 			}
+			currentDirect = directTypeInfoOrNil(current)
 			currentPath.raw.releaseExtra()
 			currentPath.raw = directRawPath{}
 			currentPath.text = path
@@ -234,6 +779,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 					path.releaseExtra()
 					return err
 				}
+				currentDirect = directTypeInfoOrNil(current)
 				currentPath.raw.releaseExtra()
 				currentPath.raw = path
 				currentPath.valid = true
@@ -254,6 +800,7 @@ func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindC
 			if err != nil {
 				return err
 			}
+			currentDirect = directTypeInfoOrNil(current)
 			currentPath.raw.releaseExtra()
 			currentPath.raw = directRawPath{}
 			currentPath.text = path
@@ -513,18 +1060,30 @@ func directAssignmentForKeyInfo(root reflect.Value, info *reflectcache.TypeInfo,
 	cur := directWritableValue(root)
 	switch cur.Kind() {
 	case reflect.Struct:
-		if info == nil || info.Type != cur.Type() {
+		var dt *directTypeInfo
+		if info != nil && info.Type == cur.Type() {
+			// Hot path: caller already holds TypeInfo from the current table.
+			if v, ok := directTypeInfoCache.Load(cur.Type()); ok {
+				dt = v.(*directTypeInfo)
+			}
+		}
+		if dt == nil {
 			var err error
-			info, err = reflectcache.Lookup(cur.Type())
+			dt, err = lookupDirectTypeInfo(cur.Type())
 			if err != nil {
 				return directAssignment{}, false, normalizeReflectcacheError(err)
 			}
 		}
-		field, ok := lookupStructFieldBytes(info, raw)
+		idx, ok := lookupStructFieldIndex(dt.info, raw)
 		if !ok {
 			return directAssignment{}, false, nil
 		}
-		return directAssignment{rawName: raw, dst: cur.FieldByIndex(field.Index), valueKind: directValueKindOfType(field.Type)}, true, nil
+		field := &dt.info.Fields[idx]
+		return directAssignment{
+			rawName:   raw,
+			dst:       fieldValue(cur, field.Index),
+			valueKind: dt.kinds[idx],
+		}, true, nil
 	case reflect.Map:
 		if cur.Type().Key().Kind() != reflect.String {
 			return directAssignment{}, false, &UnsupportedTypeError{Type: cur.Type().String()}
@@ -550,30 +1109,54 @@ const smallStructFieldLimit = 8
 // followed by the ASCII case-insensitive fallback: exact and alias matches win
 // over the case-folded scan, mirroring info.ByName exactly.
 func lookupStructFieldBytes(info *reflectcache.TypeInfo, name []byte) (*reflectcache.Field, bool) {
+	idx, ok := lookupStructFieldIndex(info, name)
+	if !ok {
+		return nil, false
+	}
+	return &info.Fields[idx], true
+}
+
+func lookupStructFieldIndex(info *reflectcache.TypeInfo, name []byte) (int, bool) {
 	fields := info.Fields
 	key := unsafeString(name)
 	if len(fields) <= smallStructFieldLimit {
+		// Prefer LowerNames: TOML keys are usually lowercase while Go field
+		// names are often mixed case. One equality per field on the hot path.
+		for i := range info.LowerNames {
+			if info.LowerNames[i] == key {
+				return i, true
+			}
+		}
 		for i := range fields {
-			if fields[i].Name == key || info.LowerNames[i] == key {
-				return &fields[i], true
+			if fields[i].Name == key {
+				return i, true
 			}
 		}
 		for i := range fields {
 			if asciiEqualFoldStringBytes(fields[i].Name, name) {
-				return &fields[i], true
+				return i, true
 			}
 		}
-		return nil, false
+		return 0, false
 	}
 	if idx, ok := info.ByNameIndex[key]; ok {
-		return &fields[idx], true
+		return int(idx), true
 	}
 	for i := range fields {
 		if asciiEqualFoldStringBytes(fields[i].Name, name) {
-			return &fields[i], true
+			return i, true
 		}
 	}
-	return nil, false
+	return 0, false
+}
+
+// fieldValue resolves a field by index path. Shallow (non-embedded) fields use
+// the cheaper Field(i) path instead of FieldByIndex.
+func fieldValue(v reflect.Value, index []int) reflect.Value {
+	if len(index) == 1 {
+		return v.Field(index[0])
+	}
+	return v.FieldByIndex(index)
 }
 
 func asciiEqualFoldStringBytes(s string, b []byte) bool {
@@ -717,7 +1300,7 @@ func directDestinationRaw(root reflect.Value, path directRawPath) (reflect.Value
 			if !ok {
 				return reflect.Value{}, directValueGeneric, false, nil
 			}
-			cur = cur.FieldByIndex(field.Index)
+			cur = fieldValue(cur, field.Index)
 		case reflect.Map:
 			return reflect.Value{}, directValueGeneric, true, nil
 		default:
@@ -744,7 +1327,7 @@ func directDestination(root reflect.Value, path []string) (reflect.Value, direct
 			if !ok {
 				return reflect.Value{}, directValueGeneric, false, nil
 			}
-			cur = cur.FieldByIndex(field.Index)
+			cur = fieldValue(cur, field.Index)
 		case reflect.Map:
 			return reflect.Value{}, directValueGeneric, true, nil
 		default:
@@ -824,6 +1407,7 @@ func appendDirectSliceElement(slot reflect.Value, capacityHint int) (elem reflec
 	}
 	slot.SetLen(index + 1)
 	elem = slot.Index(index)
+	// Clear stale fields when reusing pre-allocated capacity (len < cap).
 	elem.SetZero()
 	return directWritableValue(elem), index
 }
@@ -926,16 +1510,24 @@ func directNextValueToken(dec *Decoder) (rawToken, error) {
 		if err != nil {
 			return rawToken{}, err
 		}
-		if tok.Kind == TokenKindComment {
-			continue
+		if tok.Kind != TokenKindComment {
+			return tok, nil
 		}
-		return tok, nil
 	}
 }
 
-func directStringValue(dec *Decoder, raw []byte, cfg bindConfig) (string, error) {
+func directStringValue(dec *Decoder, tok rawToken, cfg bindConfig) (string, error) {
+	raw := tok.Bytes
 	if dec == nil || cfg.copyStrings {
 		return parseStringValue(raw)
+	}
+	// Tokenizer already validated an escape-free body: alias without re-scan.
+	if tok.flags&tokenFlagStringBodyOK != 0 {
+		body := readyStringBody(raw)
+		if s, ok := dec.arenaString(body); ok {
+			return s, nil
+		}
+		return string(body), nil
 	}
 	body, kind, err := stringValueBody(raw)
 	if err != nil {
@@ -953,6 +1545,18 @@ func directStringValue(dec *Decoder, raw []byte, cfg bindConfig) (string, error)
 	default:
 		return "", malformedStringError(raw)
 	}
+}
+
+// readyStringBody strips quotes from a tokenizer-validated string token.
+func readyStringBody(raw []byte) []byte {
+	if len(raw) < 2 {
+		return nil
+	}
+	q := raw[0]
+	if len(raw) >= 6 && raw[1] == q && raw[2] == q && (q == '"' || q == '\'') {
+		return trimInitialMultilineStringNewline(raw[3 : len(raw)-3])
+	}
+	return raw[1 : len(raw)-1]
 }
 
 func directLiteralStringValue(dec *Decoder, raw, body []byte, multiline bool) (string, error) {
@@ -1002,13 +1606,23 @@ func (d *Decoder) arenaString(raw []byte) (string, bool) {
 	return unsafe.String(&d.buf[off], len(raw)), true
 }
 
-func directBytesValue(dec *Decoder, raw []byte, cfg bindConfig) ([]byte, error) {
+func directBytesValue(dec *Decoder, tok rawToken, cfg bindConfig) ([]byte, error) {
+	raw := tok.Bytes
 	if dec == nil || cfg.copyStrings {
 		s, err := parseStringValue(raw)
 		if err != nil {
 			return nil, err
 		}
 		return []byte(s), nil
+	}
+	if tok.flags&tokenFlagStringBodyOK != 0 {
+		body := readyStringBody(raw)
+		if b, ok := dec.arenaBytes(body); ok {
+			return b, nil
+		}
+		out := make([]byte, len(body))
+		copy(out, body)
+		return out, nil
 	}
 	body, kind, err := stringValueBody(raw)
 	if err != nil {
@@ -1092,7 +1706,7 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 	switch valueKind {
 	case directValueString:
 		if tok.Kind == TokenKindValueString {
-			s, err := directStringValue(dec, tok.Bytes, cfg)
+			s, err := directStringValue(dec, tok, cfg)
 			if err != nil {
 				return err
 			}
@@ -1166,7 +1780,7 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 		}
 	case directValueBytes:
 		if tok.Kind == TokenKindValueString {
-			b, err := directBytesValue(dec, tok.Bytes, cfg)
+			b, err := directBytesValue(dec, tok, cfg)
 			if err != nil {
 				return err
 			}
@@ -1183,7 +1797,7 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 			dst.SetInt(i)
 			return nil
 		case TokenKindValueString:
-			s, err := directStringValue(dec, tok.Bytes, cfg)
+			s, err := directStringValue(dec, tok, cfg)
 			if err != nil {
 				return err
 			}
@@ -1207,7 +1821,8 @@ func directBindTypedToken(dec *Decoder, tok rawToken, dst reflect.Value, valueKi
 }
 
 func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error {
-	elemKind := directArrayElementKind(dst.Type().Elem())
+	elemType := dst.Type().Elem()
+	elemKind := directArrayElementKind(elemType)
 	if elemKind == directValueGeneric {
 		value, err := parseArrayValue(dec)
 		if err != nil {
@@ -1218,7 +1833,11 @@ func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 
 	switch dst.Kind() {
 	case reflect.Slice:
-		out := reflect.MakeSlice(dst.Type(), 0, 0)
+		// []string hot path: no per-element reflect.New.
+		if elemKind == directValueString && elemType.Kind() == reflect.String {
+			return directBindStringSlice(dec, dst, cfg)
+		}
+		out := reflect.MakeSlice(dst.Type(), 0, 4)
 		for i := 0; ; i++ {
 			tok, err := directNextValueToken(dec)
 			if err != nil {
@@ -1228,7 +1847,7 @@ func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 				dst.Set(out)
 				return nil
 			}
-			elem := reflect.New(dst.Type().Elem()).Elem()
+			elem := reflect.New(elemType).Elem()
 			if err := directBindTypedToken(dec, tok, elem, elemKind, cfg); err != nil {
 				return bindErrorPath(err, indexPath(i))
 			}
@@ -1255,6 +1874,34 @@ func directBindArrayToken(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		}
 	default:
 		return mismatch(dst.Type(), []any{})
+	}
+}
+
+func directBindStringSlice(dec *Decoder, dst reflect.Value, cfg bindConfig) error {
+	out := make([]string, 0, 4)
+	for i := 0; ; i++ {
+		tok, err := directNextValueToken(dec)
+		if err != nil {
+			return err
+		}
+		if tok.Kind == TokenKindArrayEnd {
+			setDirectStringSlice(dst, out)
+			return nil
+		}
+		if tok.Kind != TokenKindValueString {
+			// Fall back to generic typed bind for mixed arrays.
+			elem := reflect.New(dst.Type().Elem()).Elem()
+			if err := directBindTypedToken(dec, tok, elem, directValueString, cfg); err != nil {
+				return bindErrorPath(err, indexPath(i))
+			}
+			out = append(out, elem.String())
+			continue
+		}
+		s, err := directStringValue(dec, tok, cfg)
+		if err != nil {
+			return bindErrorPath(err, indexPath(i))
+		}
+		out = append(out, s)
 	}
 }
 
@@ -1295,7 +1942,7 @@ func directFieldRaw(container reflect.Value, name []byte) (reflect.Value, error)
 		if !ok {
 			return reflect.Value{}, errDirectUnknownField
 		}
-		return container.FieldByIndex(field.Index), nil
+		return fieldValue(container, field.Index), nil
 	case reflect.Map:
 		if container.Type().Key().Kind() != reflect.String {
 			return reflect.Value{}, &UnsupportedTypeError{Type: container.Type().String()}
@@ -1325,7 +1972,7 @@ func directField(container reflect.Value, name string) (reflect.Value, error) {
 		if !ok {
 			return reflect.Value{}, errDirectUnknownField
 		}
-		return container.FieldByIndex(field.Index), nil
+		return fieldValue(container, field.Index), nil
 	case reflect.Map:
 		if container.Type().Key().Kind() != reflect.String {
 			return reflect.Value{}, &UnsupportedTypeError{Type: container.Type().String()}

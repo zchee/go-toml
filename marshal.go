@@ -48,12 +48,14 @@ const (
 	quoteFallback = -2
 )
 
-var stringKeysPool sync.Pool
-var marshalBufferPool = sync.Pool{
-	New: func() any {
-		return new(bytes.Buffer)
-	},
-}
+var (
+	stringKeysPool    sync.Pool
+	marshalBufferPool = sync.Pool{
+		New: func() any {
+			return new(bytes.Buffer)
+		},
+	}
+)
 
 func init() {
 	reflectcache.EncodeFieldFallback = encodeReflectcacheField
@@ -70,30 +72,32 @@ func Marshal(v any) ([]byte, error) {
 	return marshalWithOptions(v, MarshalOptions{})
 }
 
-func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
-	hint := marshalSizeHint(v)
-	if hint > maxMarshalSizeHint {
-		var buf bytes.Buffer
-		if hint > 0 {
-			buf.Grow(hint)
-		}
-		if err := marshalToBufferDirect(&buf, v, opts); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
-	}
+// AppendMarshal appends the TOML encoding of v to dst and returns the extended
+// buffer. Prefer this over Marshal when reusing a buffer across encodes to
+// avoid allocating a fresh backing array every call.
+func AppendMarshal(dst []byte, v any) ([]byte, error) {
+	return appendMarshalWithOptions(dst, v, MarshalOptions{})
+}
 
-	buf := getMarshalBuffer()
+func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
+	return appendMarshalWithOptions(nil, v, opts)
+}
+
+func appendMarshalWithOptions(dst []byte, v any, opts MarshalOptions) ([]byte, error) {
+	hint := marshalSizeHint(v)
 	if hint > 0 {
-		buf.Grow(hint)
+		need := len(dst) + hint
+		if cap(dst) < need {
+			grown := make([]byte, len(dst), need)
+			copy(grown, dst)
+			dst = grown
+		}
 	}
+	buf := bytes.NewBuffer(dst)
 	if err := marshalToBufferDirect(buf, v, opts); err != nil {
-		putMarshalBuffer(buf)
 		return nil, err
 	}
-	out := append([]byte(nil), buf.Bytes()...)
-	putMarshalBuffer(buf)
-	return out, nil
+	return buf.Bytes(), nil
 }
 
 func getMarshalBuffer() *bytes.Buffer {
@@ -1052,18 +1056,33 @@ func estimateReflectMapMarshalSize(v reflect.Value, depth int) int {
 	return size
 }
 
+// structMarshalNameBytes caches sum of TOML field name lengths per struct type
+// so size hints do not re-sum names on every encode.
+var structMarshalNameBytes sync.Map // reflect.Type -> int
+
 func estimateReflectStructMarshalSize(v reflect.Value, depth int) int {
-	info, err := reflectcache.Lookup(v.Type())
+	t := v.Type()
+	info, err := reflectcache.Lookup(t)
 	if err != nil {
 		return v.NumField() * 32
 	}
-	size := len(info.MarshalFields) * 6
+	nameBytes := 0
+	if cached, ok := structMarshalNameBytes.Load(t); ok {
+		nameBytes = cached.(int)
+	} else {
+		for _, field := range info.MarshalFields {
+			nameBytes += len(field.Name)
+		}
+		structMarshalNameBytes.Store(t, nameBytes)
+	}
+	// Per-field " = \n" overhead (~6) plus field names, then walk values.
+	size := nameBytes + len(info.MarshalFields)*6
 	for _, field := range info.MarshalFields {
 		fv, ok := marshalFieldValue(v, field)
 		if !ok {
 			continue
 		}
-		size += len(field.Name) + estimateReflectMarshalSize(fv, depth+1)
+		size += estimateReflectMarshalSize(fv, depth+1)
 	}
 	return size
 }

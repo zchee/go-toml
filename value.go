@@ -16,7 +16,6 @@ package toml
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -51,7 +50,9 @@ var documentMapPool = sync.Pool{
 
 //nolint:cyclop,funlen,gocognit,gocyclo // top-level TOML statement dispatch with table/array-table bookkeeping; cohesive state machine.
 func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMap, error) {
-	dec := NewDecoderBytes(data, decoderOptionsWithoutTokenPositions(opts)...)
+	var decStorage Decoder
+	dec := &decStorage
+	initDecoderBytes(dec, data, decoderOptionsWithoutTokenPositions(opts)...)
 	root := newDocumentMap()
 	current := root
 	currentPath := []string(nil)
@@ -64,7 +65,7 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 	var closedInlineTables map[string]string
 	for {
 		tok, err := dec.readToken()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF {
 			return root, nil
 		}
 		if err != nil {
@@ -178,7 +179,8 @@ func parseDocument(data []byte, opts []Option, filter *decodeFilter) (documentMa
 				// error is a duplicate key, a *SyntaxError that bindErrorPath leaves
 				// untouched, so no path string is needed either. fullPath is built
 				// lazily only when the value opens an inline-table/array scope.
-				name := string(tok.Bytes)
+				// Alias input for bare keys (same contract as arena string values).
+				name := unsafeString(tok.Bytes)
 				value, err := parseNextValue(dec)
 				if err != nil {
 					return nil, err
@@ -286,8 +288,8 @@ func skipStructuralValueFast(dec *Decoder) (bool, error) {
 	if dec.innermostIsArray() {
 		dec.expectingValue = true
 	}
-	dec.needSeparator = len(dec.containerStack) > 0
-	dec.needLineEnd = len(dec.containerStack) == 0
+	dec.needSeparator = dec.containerDepth > 0
+	dec.needLineEnd = dec.containerDepth == 0
 	return true, nil
 }
 
@@ -475,7 +477,7 @@ func (d *Decoder) scanSkippedValue(start int, push func(byte, int) error) (int, 
 		}
 		return start + 1, nil
 	case '"', '\'':
-		end, _, err := d.scanString(start)
+		end, _, _, err := d.scanString(start)
 		if err != nil {
 			return 0, err
 		}
@@ -578,7 +580,7 @@ func parseValueToken(dec *Decoder, tok Token) (any, error) {
 func parseRawValueToken(dec *Decoder, tok rawToken) (any, error) {
 	switch tok.Kind {
 	case TokenKindValueString:
-		return parseStringValue(tok.Bytes)
+		return parseStringValueToken(dec, tok)
 	case TokenKindValueInteger:
 		return rawTokenIntegerValue(dec, tok)
 	case TokenKindValueFloat:
@@ -735,6 +737,19 @@ func parseStringValue(raw []byte) (string, error) {
 	default:
 		return "", malformedStringError(raw)
 	}
+}
+
+// parseStringValueToken prefers zero-copy aliasing when the tokenizer marked
+// the body escape-free and the decoder is not copying strings.
+func parseStringValueToken(dec *Decoder, tok rawToken) (string, error) {
+	raw := tok.Bytes
+	if dec != nil && !dec.copyStrings && tok.flags&tokenFlagStringBodyOK != 0 {
+		body := readyStringBody(raw)
+		if s, ok := dec.arenaString(body); ok {
+			return s, nil
+		}
+	}
+	return parseStringValue(raw)
 }
 
 func validateStringValue(raw []byte) error {

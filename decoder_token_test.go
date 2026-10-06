@@ -90,7 +90,7 @@ func TestDecoderTokenLineColCompatibilityFields(t *testing.T) {
 	t.Parallel()
 
 	input := []byte("# top\r\nnext = true\n")
-	tokens := mustReadAllTokens(t, NewDecoderBytes(input))
+	tokens := mustReadAllTokens(t, NewDecoderBytes(input, WithTokenPositions()))
 	wants := []struct {
 		name   string
 		index  int
@@ -1343,5 +1343,67 @@ func TestUnmarshal_TOML11FinalConformanceEdges(t *testing.T) {
 				t.Fatalf("Unmarshal(%q) error = nil, want failure", tc.in)
 			}
 		})
+	}
+}
+
+const parserBenchCorpusRel = "testdata/corpus/cargo.lock"
+
+func TestDecoder_NewDecoderBytes_AllocsPerRun(t *testing.T) {
+	sample := mustReadRepoFile(t, parserBenchCorpusRel)
+
+	constructorAllocs := testing.AllocsPerRun(100, func() {
+		_ = NewDecoderBytes(sample)
+	})
+	if constructorAllocs > 1 {
+		t.Fatalf("NewDecoderBytes(%q) allocs/run = %.0f, want <= 1", parserBenchCorpusRel, constructorAllocs)
+	}
+
+	const maxTokenStreamAllocs = 16
+	tokenStreamAllocs := testing.AllocsPerRun(25, func() {
+		dec := NewDecoderBytes(sample)
+		for {
+			_, err := dec.ReadToken()
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			t.Fatalf("token stream parse error = %v", err)
+		}
+	})
+	if tokenStreamAllocs > maxTokenStreamAllocs {
+		t.Fatalf("decode + read token stream allocs/run = %.0f, want <= %d", tokenStreamAllocs, maxTokenStreamAllocs)
+	}
+}
+
+func readAllTokensFromCorpus(sample []byte) error {
+	dec := NewDecoderBytes(sample)
+	for {
+		_, err := dec.ReadToken()
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+}
+
+func BenchmarkDecoderTokens_CargoLock(b *testing.B) {
+	body := mustReadRepoFile(b, parserBenchCorpusRel)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+
+	// warm-up once outside timer to avoid first-iteration overhead.
+	if err := readAllTokensFromCorpus(body); err != nil {
+		b.Fatalf("warm-up decode failed: %v", err)
+	}
+
+	for b.Loop() {
+		if err := readAllTokensFromCorpus(body); err != nil {
+			b.Fatalf("decode failed: %v", err)
+		}
 	}
 }

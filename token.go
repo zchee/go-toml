@@ -119,13 +119,15 @@ type Token struct {
 	// Line is the 1-based line of the token start.
 	//
 	// Deprecated: use Offset as the stable token position and derive line/column
-	// from the original source only when presenting diagnostics.
+	// from the original source only when presenting diagnostics. Line/Col are
+	// populated only when the decoder is created with WithTokenPositions.
 	Line int
 
 	// Col is the 1-based column of the token start.
 	//
 	// Deprecated: use Offset as the stable token position and derive line/column
-	// from the original source only when presenting diagnostics.
+	// from the original source only when presenting diagnostics. Line/Col are
+	// populated only when the decoder is created with WithTokenPositions.
 	Col int
 
 	scalar tokenScalar
@@ -135,6 +137,8 @@ type rawToken struct {
 	Kind   TokenKind
 	Bytes  []byte
 	Offset int
+	// flags carries tokenizer-proven facts so bind paths can skip re-scans.
+	flags tokenFlags
 }
 
 func (tok rawToken) publicToken() Token {
@@ -144,6 +148,16 @@ func (tok rawToken) publicToken() Token {
 func rawTokenFromToken(tok Token) rawToken {
 	return rawToken{Kind: tok.Kind, Bytes: tok.Bytes, Offset: tok.Offset}
 }
+
+// tokenFlags are internal tokenizer proofs.
+type tokenFlags uint8
+
+const (
+	// tokenFlagStringBodyOK means the quoted string body was fully validated
+	// during tokenization and requires no escape processing. Bind may
+	// arena-alias the interior bytes (quotes stripped) without re-scanning.
+	tokenFlagStringBodyOK tokenFlags = 1 << iota
+)
 
 type tokenScalarKind uint8
 

@@ -84,6 +84,16 @@ func WithCopiedStrings() Option {
 	}
 }
 
+// WithTokenPositions enables Token.Line and Token.Col population on ReadToken.
+// Positions are deprecated and off by default because incremental line/column
+// tracking is expensive; use Token.Offset and derive line/column only when needed.
+// SyntaxError positions are still computed on demand via offset scan.
+func WithTokenPositions() Option {
+	return func(d *Decoder) {
+		d.trackTokenPositions = true
+	}
+}
+
 func withoutTokenPositions(d *Decoder) {
 	d.trackTokenPositions = false
 }
@@ -121,10 +131,15 @@ type Decoder struct {
 	needLineEnd    bool
 	atLineStart    bool
 
-	limits         Limits
-	arrayDepth     int
-	inlineDepth    int
-	containerStack []byte
+	limits      Limits
+	arrayDepth  int
+	inlineDepth int
+	// containerStack holds nested array/inline markers. The inline array
+	// avoids heap growth for the shallow nesting common in configs; depth
+	// beyond the inline capacity spills to containerExtra.
+	containerStack [16]byte
+	containerDepth int
+	containerExtra []byte
 	localAsUTC     bool
 	copyStrings    bool
 	tokenLine      int
@@ -145,11 +160,46 @@ const (
 // innermostIsArray reports whether the innermost open container is an array.
 // Top-level (no open container) returns false.
 func (d *Decoder) innermostIsArray() bool {
-	n := len(d.containerStack)
+	n := d.containerDepth
 	if n == 0 {
 		return false
 	}
-	return d.containerStack[n-1] == containerArray
+	if n <= len(d.containerStack) {
+		return d.containerStack[n-1] == containerArray
+	}
+	return d.containerExtra[n-1-len(d.containerStack)] == containerArray
+}
+
+func (d *Decoder) pushContainer(c byte) {
+	n := d.containerDepth
+	if n < len(d.containerStack) {
+		d.containerStack[n] = c
+	} else {
+		d.containerExtra = append(d.containerExtra, c)
+	}
+	d.containerDepth = n + 1
+}
+
+// popContainer pops the innermost container only when it matches want. A
+// mismatched closer must leave depth and spill storage untouched so the
+// caller's syntax-error handling still sees a consistent stack.
+func (d *Decoder) popContainer(want byte) {
+	n := d.containerDepth
+	if n == 0 {
+		return
+	}
+	if n <= len(d.containerStack) {
+		if d.containerStack[n-1] != want {
+			return
+		}
+	} else {
+		idx := n - 1 - len(d.containerStack)
+		if d.containerExtra[idx] != want {
+			return
+		}
+		d.containerExtra = d.containerExtra[:idx]
+	}
+	d.containerDepth = n - 1
 }
 
 // NewDecoder creates a Decoder over an io.Reader input.
@@ -160,7 +210,7 @@ func NewDecoder(r io.Reader, opts ...Option) *Decoder {
 		line:                1,
 		col:                 1,
 		atLineStart:         true,
-		trackTokenPositions: true,
+		trackTokenPositions: false,
 		limits: Limits{
 			MaxNestedDepth:  DefaultMaxNestedDepth,
 			MaxKeyLength:    DefaultMaxKeyLength,
@@ -196,13 +246,20 @@ func NewDecoder(r io.Reader, opts ...Option) *Decoder {
 
 // NewDecoderBytes creates a Decoder over an in-memory TOML payload.
 func NewDecoderBytes(data []byte, opts ...Option) *Decoder {
-	d := &Decoder{
+	d := &Decoder{}
+	initDecoderBytes(d, data, opts...)
+	return d
+}
+
+// initDecoderBytes initializes d over data. d must be non-nil and zero or reusable.
+func initDecoderBytes(d *Decoder, data []byte, opts ...Option) {
+	*d = Decoder{
 		off:                 0,
 		line:                1,
 		col:                 1,
 		atLineStart:         true,
 		buf:                 data,
-		trackTokenPositions: true,
+		trackTokenPositions: false,
 		limits: Limits{
 			MaxNestedDepth:  DefaultMaxNestedDepth,
 			MaxKeyLength:    DefaultMaxKeyLength,
@@ -215,15 +272,14 @@ func NewDecoderBytes(data []byte, opts ...Option) *Decoder {
 	}
 	if d.limits.MaxDocumentSize > 0 && len(d.buf) > d.limits.MaxDocumentSize {
 		d.err = &LimitError{Limit: "MaxDocumentSize", Value: d.limits.MaxDocumentSize, Span: [2]int{0, d.limits.MaxDocumentSize}}
-		return d
+		return
 	}
 	if bad := scan.ValidateUTF8(d.buf); bad != len(d.buf) {
 		d.err = &SyntaxError{Line: 1, Col: bad + 1, Msg: "invalid utf-8", Span: [2]int{bad, bad + 1}}
-		return d
+		return
 	}
 	d.skipBOM()
 	d.decodeStart = d.off
-	return d
 }
 
 // Decode decodes the decoder's TOML document into dst.
@@ -239,7 +295,7 @@ func (d *Decoder) Decode(dst any) error {
 	if d.err != nil {
 		return d.err
 	}
-	if d.decoded || d.off != d.decodeStart || d.expectingValue || d.arrayDepth != 0 || d.inlineDepth != 0 || len(d.containerStack) != 0 {
+	if d.decoded || d.off != d.decodeStart || d.expectingValue || d.arrayDepth != 0 || d.inlineDepth != 0 || d.containerDepth != 0 {
 		return &DecoderStateError{Offset: d.off}
 	}
 	if err := unmarshalWithOptions(d.buf, dst, UnmarshalOptions{DecoderOptions: d.decodeOptions()}); err != nil {
@@ -376,7 +432,7 @@ func (d *Decoder) readToken() (rawToken, error) {
 				}
 				return d.scanValueToken()
 			}
-			if d.needSeparator && len(d.containerStack) > 0 {
+			if d.needSeparator && d.containerDepth > 0 {
 				return rawToken{}, d.syntaxError("expected inline table separator", d.off)
 			}
 			return d.scanKeyToken()
@@ -385,52 +441,140 @@ func (d *Decoder) readToken() (rawToken, error) {
 }
 
 func (d *Decoder) skipSpaces() {
-	for d.off < len(d.buf) {
-		rem := d.buf[d.off:]
-		// Inline first-byte guard: only pay the scan.SkipWhitespace kernel
-		// call when there is actually a space or tab to skip. Most tokens are
-		// separated by a single space (or none), so this avoids an indirect
-		// call per token for the common case. rem is non-empty by the loop
-		// condition.
-		var n int
-		if b := rem[0]; b == ' ' || b == '\t' {
-			n = scan.SkipWhitespace(rem)
-		}
-		if n > 0 {
-			wasAtLineStart := d.atLineStart
-			d.advanceBytes(rem[:n])
-			if wasAtLineStart {
-				// still at the beginning of line until first non-space.
-				d.atLineStart = true
-			}
-			continue
-		}
+	if d.trackTokenPositions {
+		d.skipSpacesTracked()
+		return
+	}
+	d.skipSpacesFast()
+}
 
-		if len(rem) > 0 && rem[0] == '\r' {
-			if len(rem) >= 2 && rem[1] == '\n' {
-				if d.valueNoNewline {
+// skipSpacesFast is the default path with Token.Line/Col tracking disabled.
+// Keeping track checks out of this loop is a measurable DecoderTokens win.
+func (d *Decoder) skipSpacesFast() {
+	buf := d.buf
+	off := d.off
+	valueNoNL := d.valueNoNewline
+	for off < len(buf) {
+		b := buf[off]
+		// Hot path: next token starts immediately (bare key, quote, bracket, …).
+		// Space/tab/CR/LF are all <= ' '; '#' is a token boundary left for the
+		// caller and is > ' ', so it falls out here too.
+		if b > ' ' {
+			d.off = off
+			return
+		}
+		switch b {
+		case ' ', '\t':
+			// Short whitespace runs are common (" = "); scan without a
+			// kernel call when the run is tiny, else hand off to SIMD.
+			n := 1
+			for off+n < len(buf) {
+				c := buf[off+n]
+				if c != ' ' && c != '\t' {
+					break
+				}
+				n++
+				if n >= 16 {
+					n = scan.SkipWhitespace(buf[off:])
+					break
+				}
+			}
+			// Horizontal space must not clear atLineStart.
+			wasAtLineStart := d.atLineStart
+			off += n
+			d.atLineStart = wasAtLineStart
+		case '\n':
+			if valueNoNL {
+				d.off = off
+				return
+			}
+			off++
+			d.atLineStart = true
+			d.needLineEnd = false
+		case '\r':
+			if off+1 < len(buf) && buf[off+1] == '\n' {
+				if valueNoNL {
+					d.off = off
 					return
 				}
-				d.advanceBytes(rem[:2])
+				off += 2
 				d.atLineStart = true
 				d.needLineEnd = false
 				continue
 			}
-		}
-		if len(rem) > 0 && rem[0] == '\n' {
-			if d.valueNoNewline {
-				return
-			}
-			d.advanceBytes(rem[:1])
-			d.atLineStart = true
-			d.needLineEnd = false
-			continue
-		}
-		if len(rem) > 0 && rem[0] == '#' {
+			// Lone CR: leave for readToken's bare-CR error.
+			d.off = off
+			return
+		default:
+			// Other C0 bytes (including unexpected controls) stay put.
+			d.off = off
 			return
 		}
-		return
 	}
+	d.off = off
+}
+
+// skipSpacesTracked updates line/col while skipping (WithTokenPositions).
+func (d *Decoder) skipSpacesTracked() {
+	buf := d.buf
+	off := d.off
+	for off < len(buf) {
+		b := buf[off]
+		if b > ' ' {
+			d.off = off
+			return
+		}
+		switch b {
+		case ' ', '\t':
+			n := 1
+			for off+n < len(buf) {
+				c := buf[off+n]
+				if c != ' ' && c != '\t' {
+					break
+				}
+				n++
+				if n >= 16 {
+					n = scan.SkipWhitespace(buf[off:])
+					break
+				}
+			}
+			wasAtLineStart := d.atLineStart
+			d.col += n
+			off += n
+			d.atLineStart = wasAtLineStart
+		case '\n':
+			if d.valueNoNewline {
+				d.off = off
+				return
+			}
+			off++
+			d.line++
+			d.col = 1
+			d.atLineStart = true
+			d.needLineEnd = false
+		case '\r':
+			if off+1 < len(buf) && buf[off+1] == '\n' {
+				if d.valueNoNewline {
+					d.off = off
+					return
+				}
+				// CRLF: line accounting matches advancePosition — only LF
+				// bumps the line; CR is invisible to columns.
+				off += 2
+				d.line++
+				d.col = 1
+				d.atLineStart = true
+				d.needLineEnd = false
+				continue
+			}
+			d.off = off
+			return
+		default:
+			d.off = off
+			return
+		}
+	}
+	d.off = off
 }
 
 func (d *Decoder) scanComment() (rawToken, error) {
@@ -549,7 +693,7 @@ func (d *Decoder) scanValueToken() (rawToken, error) {
 	ch := d.buf[start]
 	switch ch {
 	case '"', '\'':
-		end, kind, err := d.scanString(start)
+		end, kind, flags, err := d.scanString(start)
 		if err != nil {
 			return rawToken{}, err
 		}
@@ -559,15 +703,15 @@ func (d *Decoder) scanValueToken() (rawToken, error) {
 			d.setErr(err)
 			return rawToken{}, err
 		}
-		tok := d.makeToken(kind, chunk, start, tokenScalar{})
+		tok := d.makeTokenFlags(kind, chunk, start, tokenScalar{}, flags)
 		d.advanceBytes(chunk)
 		d.expectingValue = false
 		d.valueNoNewline = false
 		if d.innermostIsArray() {
 			d.expectingValue = true
 		}
-		d.needSeparator = len(d.containerStack) > 0
-		d.needLineEnd = len(d.containerStack) == 0
+		d.needSeparator = d.containerDepth > 0
+		d.needLineEnd = d.containerDepth == 0
 		return tok, nil
 	case '[':
 		return d.scanArrayStart()
@@ -601,8 +745,8 @@ func (d *Decoder) scanValueToken() (rawToken, error) {
 	if d.innermostIsArray() {
 		d.expectingValue = true
 	}
-	d.needSeparator = len(d.containerStack) > 0
-	d.needLineEnd = len(d.containerStack) == 0
+	d.needSeparator = d.containerDepth > 0
+	d.needLineEnd = d.containerDepth == 0
 	return tok, nil
 }
 
@@ -612,7 +756,7 @@ func (d *Decoder) scanArrayStart() (rawToken, error) {
 	d.advanceOne()
 	d.arrayDepth++
 	d.enforceNestedDepth(start, d.arrayDepth)
-	d.containerStack = append(d.containerStack, containerArray)
+	d.pushContainer(containerArray)
 	d.expectingValue = true
 	d.valueNoNewline = false
 	d.needSeparator = false
@@ -626,13 +770,11 @@ func (d *Decoder) scanArrayEnd() (rawToken, error) {
 	if d.arrayDepth > 0 {
 		d.arrayDepth--
 	}
-	if n := len(d.containerStack); n > 0 && d.containerStack[n-1] == containerArray {
-		d.containerStack = d.containerStack[:n-1]
-	}
+	d.popContainer(containerArray)
 	d.expectingValue = d.innermostIsArray()
 	d.valueNoNewline = false
-	d.needSeparator = len(d.containerStack) > 0
-	d.needLineEnd = len(d.containerStack) == 0
+	d.needSeparator = d.containerDepth > 0
+	d.needLineEnd = d.containerDepth == 0
 	return tok, nil
 }
 
@@ -641,7 +783,7 @@ func (d *Decoder) scanInlineTableStart() (rawToken, error) {
 	tok := d.makeToken(TokenKindInlineTableStart, d.buf[start:start+1], start, tokenScalar{})
 	d.advanceOne()
 	d.inlineDepth++
-	d.containerStack = append(d.containerStack, containerInline)
+	d.pushContainer(containerInline)
 	d.expectingValue = false
 	d.valueNoNewline = false
 	d.needSeparator = false
@@ -655,13 +797,11 @@ func (d *Decoder) scanInlineTableEnd() (rawToken, error) {
 	if d.inlineDepth > 0 {
 		d.inlineDepth--
 	}
-	if n := len(d.containerStack); n > 0 && d.containerStack[n-1] == containerInline {
-		d.containerStack = d.containerStack[:n-1]
-	}
+	d.popContainer(containerInline)
 	d.expectingValue = d.innermostIsArray()
 	d.valueNoNewline = false
-	d.needSeparator = len(d.containerStack) > 0
-	d.needLineEnd = len(d.containerStack) == 0
+	d.needSeparator = d.containerDepth > 0
+	d.needLineEnd = d.containerDepth == 0
 	return tok, nil
 }
 
@@ -826,9 +966,10 @@ func (d *Decoder) scanQuoted(quote byte, off int) (int, error) {
 }
 
 //nolint:cyclop,funlen,gocognit // multiline/single-line string terminator scan; cohesive escape state machine.
-func (d *Decoder) scanString(off int) (int, TokenKind, error) {
+func (d *Decoder) scanString(off int) (int, TokenKind, tokenFlags, error) {
 	rest := d.buf[off:]
 	if hasBytePrefix(rest, '"', '"', '"') { //nolint:nestif // multiline basic-string terminator scan; cohesive.
+		escapeFree := true
 		for end := off + 3; end < len(d.buf); {
 			n := scan.ScanBasicString(d.buf[end:])
 			end += n
@@ -838,24 +979,29 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 			switch d.buf[end] {
 			case '\\':
 				if end+1 >= len(d.buf) {
-					return 0, TokenKindInvalid, d.syntaxError("unterminated string escape", end)
+					return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string escape", end)
 				}
+				escapeFree = false
 				end += 2
 			case '"':
 				run := countByteRun(d.buf[end:], '"')
 				if run >= 3 {
 					tokenEnd := end + min(run, 5)
 					if err := validateStringValue(d.buf[off:tokenEnd]); err != nil {
-						return 0, TokenKindInvalid, err
+						return 0, TokenKindInvalid, 0, err
 					}
-					return tokenEnd, TokenKindValueString, nil
+					var flags tokenFlags
+					if escapeFree {
+						flags = tokenFlagStringBodyOK
+					}
+					return tokenEnd, TokenKindValueString, flags, nil
 				}
 				end += run
 			default:
 				end++
 			}
 		}
-		return 0, TokenKindInvalid, d.syntaxError("unterminated multiline string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated multiline string", off)
 	}
 	if hasBytePrefix(rest, '\'', '\'', '\'') { //nolint:nestif // multiline literal-string terminator scan; cohesive.
 		for end := off + 3; end < len(d.buf); {
@@ -868,23 +1014,19 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 			if run >= 3 {
 				tokenEnd := end + min(run, 5)
 				if err := validateStringValue(d.buf[off:tokenEnd]); err != nil {
-					return 0, TokenKindInvalid, err
+					return 0, TokenKindInvalid, 0, err
 				}
-				return tokenEnd, TokenKindValueString, nil
+				return tokenEnd, TokenKindValueString, tokenFlagStringBodyOK, nil
 			}
 			end += run
 		}
-		return 0, TokenKindInvalid, d.syntaxError("unterminated multiline string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated multiline string", off)
 	}
 	quote := d.buf[off]
 	if quote == '"' {
-		// escapeFree tracks whether the body contains no backslash escape. The
-		// ScanBasicStringStrict kernel only advances over bytes that are valid
-		// unescaped basic-string content (it stops at control bytes, which the
-		// default branch reports), so if the closing quote is reached without
-		// ever taking the '\\' branch, the whole body is already proven valid
-		// and the validateStringValue re-scan below is redundant. Escaped
-		// strings still need validation to check escape-sequence correctness.
+		// escapeFree: ScanBasicStringStrict only advances over valid unescaped
+		// basic-string content. Closing quote without '\\' means the body is
+		// bind-ready and can be arena-aliased without re-scanning.
 		escapeFree := true
 		for i := off + 1; i < len(d.buf); {
 			n := scan.ScanBasicStringStrict(d.buf[i:])
@@ -894,10 +1036,10 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 			}
 			switch d.buf[i] {
 			case '\n', '\r':
-				return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+				return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 			case '\\':
 				if i+1 >= len(d.buf) {
-					return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+					return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 				}
 				escapeFree = false
 				i += 2
@@ -905,30 +1047,31 @@ func (d *Decoder) scanString(off int) (int, TokenKind, error) {
 				end := i + 1
 				if !escapeFree {
 					if err := validateStringValue(d.buf[off:end]); err != nil {
-						return 0, TokenKindInvalid, err
+						return 0, TokenKindInvalid, 0, err
 					}
+					return end, TokenKindValueString, 0, nil
 				}
-				return end, TokenKindValueString, nil
+				return end, TokenKindValueString, tokenFlagStringBodyOK, nil
 			default:
-				return 0, TokenKindInvalid, stringControlError(d.buf[off+1:], i-off-1)
+				return 0, TokenKindInvalid, 0, stringControlError(d.buf[off+1:], i-off-1)
 			}
 		}
-		return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 	}
 	i := off + 1
 	n := scan.ScanLiteralString(d.buf[i:])
 	if hasNewlineBefore(d.buf[i:], n) {
-		return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+		return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 	}
 	i += n
 	if i < len(d.buf) {
 		end := i + 1
 		if err := validateStringValue(d.buf[off:end]); err != nil {
-			return 0, TokenKindInvalid, err
+			return 0, TokenKindInvalid, 0, err
 		}
-		return end, TokenKindValueString, nil
+		return end, TokenKindValueString, tokenFlagStringBodyOK, nil
 	}
-	return 0, TokenKindInvalid, d.syntaxError("unterminated string", off)
+	return 0, TokenKindInvalid, 0, d.syntaxError("unterminated string", off)
 }
 
 func countByteRun(raw []byte, b byte) int {
@@ -992,11 +1135,15 @@ func (d *Decoder) computeLineCol(off int) (line, col int) {
 }
 
 func (d *Decoder) makeToken(kind TokenKind, raw []byte, offset int, scalar tokenScalar) rawToken {
+	return d.makeTokenFlags(kind, raw, offset, scalar, 0)
+}
+
+func (d *Decoder) makeTokenFlags(kind TokenKind, raw []byte, offset int, scalar tokenScalar, flags tokenFlags) rawToken {
 	d.tokenScalar = scalar
 	if d.trackTokenPositions {
 		d.tokenLine, d.tokenCol = d.computeLineCol(offset)
 	}
-	return rawToken{Kind: kind, Bytes: raw, Offset: offset}
+	return rawToken{Kind: kind, Bytes: raw, Offset: offset, flags: flags}
 }
 
 func lineColForOffset(data []byte, off int) (line, col int) {
@@ -1022,21 +1169,24 @@ func lineColForOffset(data []byte, off int) (line, col int) {
 }
 
 func (d *Decoder) advanceOne() {
-	d.advanceBytes(d.buf[d.off : d.off+1])
+	if d.trackTokenPositions {
+		d.advanceBytes(d.buf[d.off : d.off+1])
+		return
+	}
+	d.off++
+	d.atLineStart = false
 }
 
 func (d *Decoder) advanceBytes(raw []byte) {
-	if len(raw) == 0 {
+	n := len(raw)
+	if n == 0 {
 		return
 	}
 	if d.trackTokenPositions {
 		d.advancePosition(raw)
 	}
-	d.off += len(raw)
+	d.off += n
 	d.atLineStart = false
-	if d.off >= len(d.buf) {
-		d.atLineStart = false
-	}
 }
 
 func (d *Decoder) advancePosition(raw []byte) {
