@@ -21,6 +21,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -953,6 +954,92 @@ func TestMarshalSizeHintPositiveAndBounded(t *testing.T) {
 	huge := map[string]any{"payload": strings.Repeat("x", maxMarshalSizeHint+1)}
 	if got := marshalSizeHint(huge); got != maxMarshalSizeHint {
 		t.Fatalf("marshalSizeHint(huge) = %d, want cap %d", got, maxMarshalSizeHint)
+	}
+}
+
+// TestMarshalReturnsRightSizedBuffer guards Marshal against returning a
+// backing array sized by the encoder's size estimate, which can overshoot the
+// document by a third, and against returning memory the encoder reuses.
+//
+// It is not parallel: the reuse check depends on the next Marshal call drawing
+// the scratch buffer the previous one returned to the process-wide pool.
+func TestMarshalReturnsRightSizedBuffer(t *testing.T) {
+	type cargoPackage struct {
+		Name         string
+		Version      string
+		Source       string
+		Checksum     string
+		Dependencies []string `toml:"dependencies"`
+	}
+	type cargoLock struct {
+		Version int            `toml:"version"`
+		Package []cargoPackage `toml:"package"`
+	}
+	var lock cargoLock
+	if err := Unmarshal(mustReadRepoFile(t, parserBenchCorpusRel), &lock); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", parserBenchCorpusRel, err)
+	}
+	renamed := cargoLock{Version: lock.Version, Package: slices.Clone(lock.Package)}
+	for i := range renamed.Package {
+		renamed.Package[i].Name = strings.Repeat("x", len(renamed.Package[i].Name))
+	}
+
+	type rows struct {
+		Rows []string
+	}
+	hugeRows := func(fill string) rows {
+		row := strings.Repeat(fill, 1<<10)
+		return rows{Rows: slices.Repeat([]string{row}, maxMarshalSizeHint>>10+64)}
+	}
+
+	tests := map[string]struct {
+		value      any
+		other      any // encodes to the same length as value with different bytes
+		rightSized bool
+	}{
+		"success: small struct": {
+			value:      struct{ Name string }{Name: "demo"},
+			other:      struct{ Name string }{Name: "omed"},
+			rightSized: true,
+		},
+		"success: large document whose size estimate overshoots": {
+			value:      &lock,
+			other:      &renamed,
+			rightSized: true,
+		},
+		"success: document too large for the pooled buffer": {
+			value:      hugeRows("a"),
+			other:      hugeRows("b"),
+			rightSized: false,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			out, err := Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("Marshal(value) error = %v", err)
+			}
+			if len(out) == 0 {
+				t.Fatal("Marshal(value) returned an empty document")
+			}
+			// Allocator size classes round small objects up by at most 1/8 and
+			// large ones up to a page, so anything beyond that is estimate slack.
+			if slack, limit := cap(out)-len(out), len(out)/8+8192; tc.rightSized && slack > limit {
+				t.Errorf("Marshal(value) returned cap %d for %d bytes: slack %d, want <= %d", cap(out), len(out), slack, limit)
+			}
+
+			want := string(out)
+			other, err := Marshal(tc.other)
+			if err != nil {
+				t.Fatalf("Marshal(other) error = %v", err)
+			}
+			if len(other) != len(out) || string(other) == want {
+				t.Fatalf("Marshal(other) = %d bytes, want %d bytes that differ from Marshal(value)", len(other), len(out))
+			}
+			if string(out) != want {
+				t.Error("Marshal(value) result changed when Marshal(other) ran: the returned slice shares memory with the encoder")
+			}
+		})
 	}
 }
 

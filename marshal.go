@@ -80,7 +80,25 @@ func AppendMarshal(dst []byte, v any) ([]byte, error) {
 }
 
 func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
-	return appendMarshalWithOptions(nil, v, opts)
+	// The size hint is an estimate that can overshoot the document by a wide
+	// margin, so encode into pooled scratch and return an exact-size copy
+	// instead of handing the caller a hint-sized backing array.
+	scratch := getMarshalBuffer()
+	if hint := marshalSizeHint(v); hint > 0 {
+		scratch.Grow(hint)
+	}
+	if err := marshalToBufferDirect(scratch, v, opts); err != nil {
+		putMarshalBuffer(scratch)
+		return nil, err
+	}
+	if scratch.Cap() > maxMarshalSizeHint {
+		// Too large to go back to the pool, so the caller can own it outright
+		// instead of paying for a second full-size allocation.
+		return scratch.Bytes(), nil
+	}
+	out := append([]byte(nil), scratch.Bytes()...)
+	putMarshalBuffer(scratch)
+	return out, nil
 }
 
 func appendMarshalWithOptions(dst []byte, v any, opts MarshalOptions) ([]byte, error) {
