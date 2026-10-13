@@ -25,6 +25,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/zchee/go-toml/internal/reflectcache"
 )
@@ -1043,38 +1046,88 @@ func TestMarshalReturnsRightSizedBuffer(t *testing.T) {
 	}
 }
 
+// TestAppendMarshal is not parallel: testing.AllocsPerRun panics inside a
+// parallel test.
 func TestAppendMarshal(t *testing.T) {
-	t.Parallel()
 	type cfg struct {
 		Name  string
 		Count int
 	}
-	value := cfg{Name: "demo", Count: 3}
+	value := &cfg{Name: "demo", Count: 3}
 	body, err := Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
 	prefix := []byte("prefix:")
-	got, err := AppendMarshal(append([]byte(nil), prefix...), value)
-	if err != nil {
-		t.Fatal(err)
+	// AppendMarshal grows dst whenever its spare capacity is below the size
+	// hint, so a buffer that must be reused needs room for the larger of the
+	// hint and the real encoding.
+	room := len(prefix) + max(len(body), marshalSizeHint(value))
+
+	tests := map[string]struct {
+		dst       func() []byte
+		v         any
+		want      []byte
+		wantErr   error
+		wantReuse bool
+	}{
+		"success: appends after existing bytes": {
+			dst:  func() []byte { return slices.Clone(prefix) },
+			v:    value,
+			want: append(slices.Clone(prefix), body...),
+		},
+		"success: writes into spare capacity without reallocating": {
+			dst:       func() []byte { return append(make([]byte, 0, room), prefix...) },
+			v:         value,
+			want:      append(slices.Clone(prefix), body...),
+			wantReuse: true,
+		},
+		"success: nil dst": {
+			dst:  func() []byte { return nil },
+			v:    value,
+			want: body,
+		},
+		"error: encode failure returns nil": {
+			dst:     func() []byte { return append(make([]byte, 0, room), prefix...) },
+			v:       map[string]string{"bad\xffkey": "value"},
+			wantErr: errInvalidUTF8,
+		},
 	}
-	if !bytes.HasPrefix(got, prefix) {
-		t.Fatalf("missing prefix: %q", got)
-	}
-	if !bytes.Equal(got[len(prefix):], body) {
-		t.Fatalf("appended body = %q, want %q", got[len(prefix):], body)
-	}
-	// Reuse capacity: second append should not require a larger slice when
-	// the buffer already has spare room sized by the first encode.
-	buf := make([]byte, 0, len(prefix)+len(body)+8)
-	buf = append(buf, prefix...)
-	out, err := AppendMarshal(buf, value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cap(out) < cap(buf) {
-		t.Fatalf("cap shrunk: %d -> %d", cap(buf), cap(out))
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			dst := tt.dst()
+			got, err := AppendMarshal(dst, tt.v)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("AppendMarshal() error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr != nil {
+				if got != nil {
+					t.Fatalf("AppendMarshal() = %q with error, want nil", got)
+				}
+				return
+			}
+			if diff := cmp.Diff(string(tt.want), string(got)); diff != "" {
+				t.Fatalf("AppendMarshal() mismatch (-want +got):\n%s", diff)
+			}
+			if !tt.wantReuse {
+				return
+			}
+			if unsafe.SliceData(got) != unsafe.SliceData(dst) {
+				t.Fatalf("AppendMarshal() moved to a new backing array (cap %d -> %d), want dst reused", cap(dst), cap(got))
+			}
+			// Each run appends into the same spare capacity after the prefix.
+			// The one allowed allocation is the *bytes.Buffer header that
+			// appendMarshalWithOptions wraps dst in, which escapes into the
+			// encoder; a new backing array for the output would be a second.
+			allocs := testing.AllocsPerRun(100, func() {
+				if _, err := AppendMarshal(dst, tt.v); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if allocs > 1 {
+				t.Fatalf("AppendMarshal() into spare capacity allocs/op = %v, want at most 1 (the bytes.Buffer header)", allocs)
+			}
+		})
 	}
 }
 
