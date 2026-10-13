@@ -1226,13 +1226,13 @@ func (d *Decoder) advancePosition(raw []byte) {
 		}
 		return
 	}
-	lastLF := bytes.LastIndexByte(raw, '\n')
-	if lastLF < 0 {
+	_, after, ok := bytes.CutLast(raw, []byte{'\n'})
+	if !ok {
 		d.col += displayColumnDelta(raw)
 		return
 	}
 	d.line += scan.CountLines(raw)
-	d.col = 1 + displayColumnDelta(raw[lastLF+1:])
+	d.col = 1 + displayColumnDelta(after)
 }
 
 func displayColumnDelta(raw []byte) int {
