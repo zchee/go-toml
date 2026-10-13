@@ -1074,33 +1074,18 @@ func estimateReflectMapMarshalSize(v reflect.Value, depth int) int {
 	return size
 }
 
-// structMarshalNameBytes caches sum of TOML field name lengths per struct type
-// so size hints do not re-sum names on every encode.
-var structMarshalNameBytes sync.Map // reflect.Type -> int
-
 func estimateReflectStructMarshalSize(v reflect.Value, depth int) int {
-	t := v.Type()
-	info, err := reflectcache.Lookup(t)
+	info, err := reflectcache.Lookup(v.Type())
 	if err != nil {
 		return v.NumField() * 32
 	}
-	nameBytes := 0
-	if cached, ok := structMarshalNameBytes.Load(t); ok {
-		nameBytes = cached.(int)
-	} else {
-		for _, field := range info.MarshalFields {
-			nameBytes += len(field.Name)
-		}
-		structMarshalNameBytes.Store(t, nameBytes)
-	}
-	// Per-field " = \n" overhead (~6) plus field names, then walk values.
-	size := nameBytes + len(info.MarshalFields)*6
+	size := len(info.MarshalFields) * 6
 	for _, field := range info.MarshalFields {
 		fv, ok := marshalFieldValue(v, field)
 		if !ok {
 			continue
 		}
-		size += estimateReflectMarshalSize(fv, depth+1)
+		size += len(field.Name) + estimateReflectMarshalSize(fv, depth+1)
 	}
 	return size
 }
