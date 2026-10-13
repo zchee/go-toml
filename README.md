@@ -123,11 +123,9 @@ the token's byte offset in the source document. `WithLimits`
 configures parser caps for document size, nesting depth, key length, and string
 length; cap violations return `*LimitError`.
 
-Migration note: token positions are byte-offset based. `Token.Line` and
-`Token.Col` remain populated for source compatibility, but they are deprecated;
-new consumers should retain `Token.Offset` and derive line/column from the
-original source only when presenting diagnostics. Structured parser errors still
-include line/column text for user-facing error messages.
+Token positions are byte offsets: `Token.Offset` is the only position a token
+carries. Line and column for diagnostics come from `SyntaxError.Line` and
+`SyntaxError.Col`, which parser errors also print as "at line L col C".
 
 `Decode` is a whole-document convenience and is only valid before token
 consumption starts. If a caller has already called `ReadToken`, continue with the

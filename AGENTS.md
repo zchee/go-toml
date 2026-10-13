@@ -23,8 +23,8 @@ format-preserving document edits.
 
 - Keep the public package flat: no new production subpackages beyond
   `internal/reflectcache` and `internal/scan` without a design.
-- Token positions are byte offsets. `Token.Line` and `Token.Col` are populated
-  for compatibility but are deprecated.
+- Token positions are byte offsets (`Token.Offset`). Line/column for
+  diagnostics come from `SyntaxError.Line`/`Col`.
 - `Decoder.Decode` is whole-document convenience before token consumption; once
   `ReadToken` starts, stay on token API or create a new decoder.
 - Struct tags use `toml:"name"` and `toml:"name,omitzero"`.

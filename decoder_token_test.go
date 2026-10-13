@@ -86,33 +86,29 @@ func TestDecoderTokenOffsets(t *testing.T) {
 	}
 }
 
-func TestDecoderTokenLineColCompatibilityFields(t *testing.T) {
+func TestDecoderTokenOffsetsAcrossCRLF(t *testing.T) {
 	t.Parallel()
 
 	input := []byte("# top\r\nnext = true\n")
-	tokens := mustReadAllTokens(t, NewDecoderBytes(input, WithTokenPositions()))
+	tokens := mustReadAllTokens(t, NewDecoderBytes(input))
 	wants := []struct {
 		name   string
 		index  int
 		offset int
-		line   int
-		col    int
 	}{
-		{name: "comment", index: 0, offset: 0, line: 1, col: 1},
-		{name: "key", index: 1, offset: len("# top\r\n"), line: 2, col: 1},
-		{name: "value", index: 2, offset: len("# top\r\nnext = "), line: 2, col: 8},
+		{name: "comment", index: 0, offset: 0},
+		{name: "key", index: 1, offset: len("# top\r\n")},
+		{name: "value", index: 2, offset: len("# top\r\nnext = ")},
 	}
 	if len(tokens) != len(wants) {
 		t.Fatalf("ReadToken count = %d, want %d: %#v", len(tokens), len(wants), tokens)
 	}
 	for _, want := range wants {
 		got := tokens[want.index]
-		if got.Offset != want.offset || got.Line != want.line || got.Col != want.col {
-			t.Fatalf("%s token position = offset %d line %d col %d, want offset %d line %d col %d", want.name, got.Offset, got.Line, got.Col, want.offset, want.line, want.col)
+		if got.Offset != want.offset {
+			t.Fatalf("%s token offset = %d, want %d", want.name, got.Offset, want.offset)
 		}
 	}
-
-	_ = Token{Offset: 0, Line: 1, Col: 1}
 }
 
 func TestDecoderSyntaxErrorLineColumnAfterLazyAdvance(t *testing.T) {
@@ -1379,18 +1375,21 @@ func TestResolveDecoderSettings(t *testing.T) {
 				WithLimits(Limits{MaxNestedDepth: 3, MaxKeyLength: 5, MaxStringLength: 9, MaxDocumentSize: 11}),
 				WithLocalAsUTC(),
 				WithCopiedStrings(),
-				WithTokenPositions(),
 			},
 			want: decoderSettings{
-				limits:              Limits{MaxNestedDepth: 3, MaxKeyLength: 5, MaxStringLength: 9, MaxDocumentSize: 11},
-				localAsUTC:          true,
-				copyStrings:         true,
-				trackTokenPositions: true,
+				limits:      Limits{MaxNestedDepth: 3, MaxKeyLength: 5, MaxStringLength: 9, MaxDocumentSize: 11},
+				localAsUTC:  true,
+				copyStrings: true,
 			},
 		},
 		"success: later options override earlier ones": {
-			opts: []Option{WithTokenPositions(), withoutTokenPositions},
-			want: decoderSettings{limits: defaults},
+			opts: []Option{WithLimits(Limits{MaxKeyLength: 7}), WithLimits(Limits{MaxKeyLength: 9})},
+			want: decoderSettings{limits: Limits{
+				MaxNestedDepth:  DefaultMaxNestedDepth,
+				MaxKeyLength:    9,
+				MaxStringLength: DefaultMaxStringLength,
+				MaxDocumentSize: DefaultMaxDocumentSize,
+			}},
 		},
 	}
 	for name, tc := range tests {
@@ -1405,10 +1404,9 @@ func TestResolveDecoderSettings(t *testing.T) {
 			var dec Decoder
 			initDecoderBytes(&dec, []byte("a = 1\n"), got)
 			fromInit := decoderSettings{
-				limits:              dec.limits,
-				localAsUTC:          dec.localAsUTC,
-				copyStrings:         dec.copyStrings,
-				trackTokenPositions: dec.trackTokenPositions,
+				limits:      dec.limits,
+				localAsUTC:  dec.localAsUTC,
+				copyStrings: dec.copyStrings,
 			}
 			if diff := gocmp.Diff(tc.want, fromInit, gocmp.AllowUnexported(decoderSettings{})); diff != "" {
 				t.Errorf("initDecoderBytes() settings mismatch (-want +got):\n%s", diff)
@@ -1416,10 +1414,9 @@ func TestResolveDecoderSettings(t *testing.T) {
 
 			public := NewDecoderBytes([]byte("a = 1\n"), tc.opts...)
 			fromPublic := decoderSettings{
-				limits:              public.limits,
-				localAsUTC:          public.localAsUTC,
-				copyStrings:         public.copyStrings,
-				trackTokenPositions: public.trackTokenPositions,
+				limits:      public.limits,
+				localAsUTC:  public.localAsUTC,
+				copyStrings: public.copyStrings,
 			}
 			if diff := gocmp.Diff(tc.want, fromPublic, gocmp.AllowUnexported(decoderSettings{})); diff != "" {
 				t.Errorf("NewDecoderBytes() settings mismatch (-want +got):\n%s", diff)

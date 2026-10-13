@@ -84,30 +84,15 @@ func WithCopiedStrings() Option {
 	}
 }
 
-// WithTokenPositions enables Token.Line and Token.Col population on ReadToken.
-// Positions are deprecated and off by default because incremental line/column
-// tracking is expensive; use Token.Offset and derive line/column only when needed.
-// SyntaxError positions are still computed on demand via offset scan.
-func WithTokenPositions() Option {
-	return func(d *Decoder) {
-		d.trackTokenPositions = true
-	}
-}
-
-func withoutTokenPositions(d *Decoder) {
-	d.trackTokenPositions = false
-}
-
 // decoderSettings is the Decoder state that options can change.
 //
 // Options are opaque func values, so handing them the decoder that is being
 // initialized makes that decoder escape to the heap. Resolving them into this
 // value first lets the whole-document paths keep their Decoder on the stack.
 type decoderSettings struct {
-	limits              Limits
-	localAsUTC          bool
-	copyStrings         bool
-	trackTokenPositions bool
+	limits      Limits
+	localAsUTC  bool
+	copyStrings bool
 }
 
 func defaultLimits() Limits {
@@ -125,15 +110,13 @@ func (d *Decoder) applyOptions(opts []Option) decoderSettings {
 	d.limits = defaultLimits()
 	d.localAsUTC = false
 	d.copyStrings = false
-	d.trackTokenPositions = false
 	for _, opt := range opts {
 		opt(d)
 	}
 	return decoderSettings{
-		limits:              d.limits,
-		localAsUTC:          d.localAsUTC,
-		copyStrings:         d.copyStrings,
-		trackTokenPositions: d.trackTokenPositions,
+		limits:      d.limits,
+		localAsUTC:  d.localAsUTC,
+		copyStrings: d.copyStrings,
 	}
 }
 
@@ -157,8 +140,6 @@ type Decoder struct {
 	buf            []byte
 	off            int
 	decodeStart    int
-	line           int
-	col            int
 	err            error
 	decoded        bool
 	expectingValue bool
@@ -178,11 +159,7 @@ type Decoder struct {
 	containerExtra []byte
 	localAsUTC     bool
 	copyStrings    bool
-	tokenLine      int
-	tokenCol       int
 	tokenScalar    tokenScalar
-
-	trackTokenPositions bool
 }
 
 // containerArray and containerInline mark entries pushed onto containerStack
@@ -242,12 +219,9 @@ func (d *Decoder) popContainer(want byte) {
 func NewDecoder(r io.Reader, opts ...Option) *Decoder {
 	b, err := io.ReadAll(r)
 	d := &Decoder{
-		off:                 0,
-		line:                1,
-		col:                 1,
-		atLineStart:         true,
-		trackTokenPositions: false,
-		limits:              defaultLimits(),
+		off:         0,
+		atLineStart: true,
+		limits:      defaultLimits(),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -285,15 +259,12 @@ func NewDecoderBytes(data []byte, opts ...Option) *Decoder {
 // initDecoderBytes initializes d over data. d must be non-nil and zero or reusable.
 func initDecoderBytes(d *Decoder, data []byte, settings decoderSettings) {
 	*d = Decoder{
-		off:                 0,
-		line:                1,
-		col:                 1,
-		atLineStart:         true,
-		buf:                 data,
-		limits:              settings.limits,
-		localAsUTC:          settings.localAsUTC,
-		copyStrings:         settings.copyStrings,
-		trackTokenPositions: settings.trackTokenPositions,
+		off:         0,
+		atLineStart: true,
+		buf:         data,
+		limits:      settings.limits,
+		localAsUTC:  settings.localAsUTC,
+		copyStrings: settings.copyStrings,
 	}
 	if d.limits.MaxDocumentSize > 0 && len(d.buf) > d.limits.MaxDocumentSize {
 		d.err = &LimitError{Limit: "MaxDocumentSize", Value: d.limits.MaxDocumentSize, Span: [2]int{0, d.limits.MaxDocumentSize}}
@@ -353,10 +324,6 @@ func (d *Decoder) ReadToken() (Token, error) {
 	}
 	pub := tok.publicToken()
 	pub.scalar = d.tokenScalar
-	if d.trackTokenPositions {
-		pub.Line = d.tokenLine
-		pub.Col = d.tokenCol
-	}
 	return pub, nil
 }
 
@@ -465,17 +432,9 @@ func (d *Decoder) readToken() (rawToken, error) {
 	}
 }
 
+// skipSpaces advances past horizontal whitespace and line endings up to the
+// next token boundary, updating atLineStart and needLineEnd as lines end.
 func (d *Decoder) skipSpaces() {
-	if d.trackTokenPositions {
-		d.skipSpacesTracked()
-		return
-	}
-	d.skipSpacesFast()
-}
-
-// skipSpacesFast is the default path with Token.Line/Col tracking disabled.
-// Keeping track checks out of this loop is a measurable DecoderTokens win.
-func (d *Decoder) skipSpacesFast() {
 	buf := d.buf
 	off := d.off
 	valueNoNL := d.valueNoNewline
@@ -532,69 +491,6 @@ func (d *Decoder) skipSpacesFast() {
 			return
 		default:
 			// Other C0 bytes (including unexpected controls) stay put.
-			d.off = off
-			return
-		}
-	}
-	d.off = off
-}
-
-// skipSpacesTracked updates line/col while skipping (WithTokenPositions).
-func (d *Decoder) skipSpacesTracked() {
-	buf := d.buf
-	off := d.off
-	for off < len(buf) {
-		b := buf[off]
-		if b > ' ' {
-			d.off = off
-			return
-		}
-		switch b {
-		case ' ', '\t':
-			n := 1
-			for off+n < len(buf) {
-				c := buf[off+n]
-				if c != ' ' && c != '\t' {
-					break
-				}
-				n++
-				if n >= 16 {
-					n = scan.SkipWhitespace(buf[off:])
-					break
-				}
-			}
-			wasAtLineStart := d.atLineStart
-			d.col += n
-			off += n
-			d.atLineStart = wasAtLineStart
-		case '\n':
-			if d.valueNoNewline {
-				d.off = off
-				return
-			}
-			off++
-			d.line++
-			d.col = 1
-			d.atLineStart = true
-			d.needLineEnd = false
-		case '\r':
-			if off+1 < len(buf) && buf[off+1] == '\n' {
-				if d.valueNoNewline {
-					d.off = off
-					return
-				}
-				// CRLF: line accounting matches advancePosition — only LF
-				// bumps the line; CR is invisible to columns.
-				off += 2
-				d.line++
-				d.col = 1
-				d.atLineStart = true
-				d.needLineEnd = false
-				continue
-			}
-			d.off = off
-			return
-		default:
 			d.off = off
 			return
 		}
@@ -1143,20 +1039,10 @@ func (d *Decoder) setErr(err error) {
 }
 
 func (d *Decoder) syntaxError(msg string, off int) *SyntaxError {
-	line, col := d.computeLineCol(off)
+	line, col := lineColForOffset(d.buf, off)
 	err := &SyntaxError{Line: line, Col: col, Msg: msg, Span: [2]int{off, off + 1}}
 	d.err = err
 	return err
-}
-
-func (d *Decoder) computeLineCol(off int) (line, col int) {
-	if d == nil {
-		return 1, 1
-	}
-	if d.trackTokenPositions && off == d.off {
-		return d.line, d.col
-	}
-	return lineColForOffset(d.buf, off)
 }
 
 func (d *Decoder) makeToken(kind TokenKind, raw []byte, offset int, scalar tokenScalar) rawToken {
@@ -1165,9 +1051,6 @@ func (d *Decoder) makeToken(kind TokenKind, raw []byte, offset int, scalar token
 
 func (d *Decoder) makeTokenFlags(kind TokenKind, raw []byte, offset int, scalar tokenScalar, flags tokenFlags) rawToken {
 	d.tokenScalar = scalar
-	if d.trackTokenPositions {
-		d.tokenLine, d.tokenCol = d.computeLineCol(offset)
-	}
 	return rawToken{Kind: kind, Bytes: raw, Offset: offset, flags: flags}
 }
 
@@ -1194,10 +1077,6 @@ func lineColForOffset(data []byte, off int) (line, col int) {
 }
 
 func (d *Decoder) advanceOne() {
-	if d.trackTokenPositions {
-		d.advanceBytes(d.buf[d.off : d.off+1])
-		return
-	}
 	d.off++
 	d.atLineStart = false
 }
@@ -1207,45 +1086,8 @@ func (d *Decoder) advanceBytes(raw []byte) {
 	if n == 0 {
 		return
 	}
-	if d.trackTokenPositions {
-		d.advancePosition(raw)
-	}
 	d.off += n
 	d.atLineStart = false
-}
-
-func (d *Decoder) advancePosition(raw []byte) {
-	if len(raw) == 1 {
-		switch raw[0] {
-		case '\n':
-			d.line++
-			d.col = 1
-		case '\r':
-		default:
-			d.col++
-		}
-		return
-	}
-	_, after, ok := bytes.CutLast(raw, []byte{'\n'})
-	if !ok {
-		d.col += displayColumnDelta(raw)
-		return
-	}
-	d.line += scan.CountLines(raw)
-	d.col = 1 + displayColumnDelta(after)
-}
-
-func displayColumnDelta(raw []byte) int {
-	if bytes.IndexByte(raw, '\r') < 0 {
-		return len(raw)
-	}
-	n := 0
-	for _, b := range raw {
-		if b != '\r' {
-			n++
-		}
-	}
-	return n
 }
 
 func (d *Decoder) matchPrefix(prefix string) bool {

@@ -15,10 +15,9 @@
 // Package toml provides a flat TOML API backed by a shared streaming parser.
 //
 // The low-level API starts with Decoder and Token for callers that need to
-// inspect TOML input without building Go values. Tokens report byte Offset;
-// deprecated Line and Col fields remain populated for source compatibility.
-// New callers that need line/column display should derive it from the original
-// source when formatting diagnostics. The high-level facade exposes Marshal
+// inspect TOML input without building Go values. Tokens report their position
+// as a byte Offset into the source; parse failures report line and column in
+// SyntaxError. The high-level facade exposes Marshal
 // and Unmarshal for struct, map, scalar, array, and datetime values.
 // ParseDocument returns a format-preserving Document for edit-in-place workflows
 // where comments, whitespace, and untouched source spans must remain
