@@ -180,8 +180,12 @@ func parseDocument(data []byte, settings decoderSettings, filter *decodeFilter) 
 				// error is a duplicate key, a *SyntaxError that bindErrorPath leaves
 				// untouched, so no path string is needed either. fullPath is built
 				// lazily only when the value opens an inline-table/array scope.
-				// Alias input for bare keys (same contract as arena string values).
+				// Alias input for bare keys (same contract as arena string
+				// values) unless WithCopiedStrings asks for an independent result.
 				name := unsafeString(tok.Bytes)
+				if dec.copyStrings {
+					name = string(tok.Bytes)
+				}
 				value, err := parseNextValue(dec)
 				if err != nil {
 					return nil, err

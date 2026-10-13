@@ -21,6 +21,7 @@ import (
 	"os"
 	"reflect"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1146,4 +1147,81 @@ func TestParseDocumentMapDecodeAllocations(t *testing.T) {
 	if allocs > ceiling {
 		t.Errorf("map[string]any decode allocs/op = %.0f, want <= %d (regression; unoptimized baseline was 670)", allocs, ceiling)
 	}
+}
+
+func TestUnmarshalMapCopiedStringsKeysDoNotAliasInput(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		input string
+		want  map[string]any
+	}{
+		"success: bare key": {
+			input: "key = 1\n",
+			want:  map[string]any{"key": int64(1)},
+		},
+		"success: bare key with string value": {
+			input: "name = \"value\"\n",
+			want:  map[string]any{"name": "value"},
+		},
+		"success: keys under table and array-table headers": {
+			input: "[tbl]\ninner = 'v'\n[[arr]]\nx = 1\n",
+			want: map[string]any{
+				"tbl": map[string]any{"inner": "v"},
+				"arr": []any{map[string]any{"x": int64(1)}},
+			},
+		},
+		"success: dotted and inline-table keys": {
+			input: "d.e = 1\nit = {k = 2, s = \"t\"}\n",
+			want: map[string]any{
+				"d":  map[string]any{"e": int64(1)},
+				"it": map[string]any{"k": int64(2), "s": "t"},
+			},
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			data := []byte(tt.input)
+			var got map[string]any
+			if err := (UnmarshalOptions{DecoderOptions: []Option{WithCopiedStrings()}}).Unmarshal(data, &got); err != nil {
+				t.Fatalf("Unmarshal(%q) error = %v", tt.input, err)
+			}
+			// WithCopiedStrings promises that nothing in the result aliases the
+			// input, so clobbering the input must not change the decoded map.
+			for i := range data {
+				data[i] = 'x'
+			}
+			// Compare the keys seen by iteration first: aliased keys read back
+			// as the clobbered bytes, which also makes them collide and would
+			// make cmp.Diff panic on the corrupted map.
+			if diff := cmp.Diff(mapKeyPaths(tt.want, ""), mapKeyPaths(got, "")); diff != "" {
+				t.Fatalf("map keys changed after the input was overwritten (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("decoded map changed after the input was overwritten (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// mapKeyPaths returns the sorted dotted paths of every key reachable from m by
+// iteration, descending into nested maps and arrays of maps.
+func mapKeyPaths(m map[string]any, prefix string) []string {
+	var paths []string
+	for k, v := range m {
+		path := prefix + k
+		paths = append(paths, path)
+		switch v := v.(type) {
+		case map[string]any:
+			paths = append(paths, mapKeyPaths(v, path+".")...)
+		case []any:
+			for _, elem := range v {
+				if em, ok := elem.(map[string]any); ok {
+					paths = append(paths, mapKeyPaths(em, path+"[].")...)
+				}
+			}
+		}
+	}
+	slices.Sort(paths)
+	return paths
 }
