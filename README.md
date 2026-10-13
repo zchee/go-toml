@@ -56,6 +56,13 @@ func save(cfg Config) ([]byte, error) {
 }
 ```
 
+`AppendMarshal` appends the encoding to a caller-owned buffer so repeated
+encodes can reuse capacity instead of allocating a fresh result each call:
+
+```go
+out, err := toml.AppendMarshal(buf[:0], cfg)
+```
+
 `Encoder` writes one TOML document to an `io.Writer`:
 
 ```go
@@ -84,11 +91,13 @@ out, err := marshalOptions.Marshal(cfg)
 err = unmarshalOptions.Unmarshal(out, &cfg)
 ```
 
-For direct struct decoding, escape-free TOML string values share one immutable
-per-document string arena by default. This keeps allocation count low while
-preventing decoded strings from aliasing caller-owned `[]byte` input. Escaped
-strings still use an independent decoded copy. Use `WithCopiedStrings` when the
-destination should not retain one document-sized arena after decoding:
+By default, decoded strings alias the input `data` (zero copy): every
+escape-free string value, and every bare key of a `map[string]any` result,
+points into the caller's buffer. The caller must not modify `data` while any
+decoded string is in use, and must not keep decoded strings past a later
+modification of `data`. Strings with escapes are always decoded into an
+independent allocation. Use `WithCopiedStrings` to copy every decoded string and
+key, so the result is independent of `data` and `data` can be reused:
 
 ```go
 opts := toml.UnmarshalOptions{
