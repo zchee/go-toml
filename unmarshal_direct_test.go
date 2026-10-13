@@ -17,6 +17,8 @@ package toml
 import (
 	"errors"
 	"testing"
+
+	gocmp "github.com/google/go-cmp/cmp"
 )
 
 func TestDirectBindSimpleAssignment(t *testing.T) {
@@ -390,8 +392,7 @@ dependencies = ["ok", 1]
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var mismatch *TypeMismatchError
-	if !errors.As(err, &mismatch) {
+	if _, ok := errors.AsType[*TypeMismatchError](err); !ok {
 		t.Fatalf("err = %T(%v)", err, err)
 	}
 }
@@ -430,4 +431,264 @@ func TestDirectBindUnknownTableKeysIgnored(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fusedPkg and fusedDoc expose fields that the fused direct-decoding paths
+// bind: scalar keys, a known []string, a [table] header and an [[array-table]]
+// header. Keys that are not fields here exercise the fused skippers.
+type fusedPkg struct {
+	Name string   `toml:"name"`
+	Deps []string `toml:"deps"`
+}
+
+type fusedDoc struct {
+	A        int        `toml:"a"`
+	B        int        `toml:"b"`
+	LongName int        `toml:"longname"`
+	Deps     []string   `toml:"deps"`
+	Table    fusedPkg   `toml:"table"`
+	Pkgs     []fusedPkg `toml:"pkgs"`
+}
+
+// decodeFusedBothPaths decodes input through the direct struct path and through
+// map[string]any, which goes through Decoder.readToken for every statement and
+// is the reference for the error each input must produce.
+func decodeFusedBothPaths(t *testing.T, input string, opts ...Option) (doc fusedDoc, directErr, mapErr error) {
+	t.Helper()
+	o := UnmarshalOptions{DecoderOptions: opts}
+	directErr = o.Unmarshal([]byte(input), &doc)
+	var m map[string]any
+	mapErr = o.Unmarshal([]byte(input), &m)
+	return doc, directErr, mapErr
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// fusedErrorCase is one input for the fused-path error tables. An empty
+// wantErr means the input is valid and must decode to want.
+type fusedErrorCase struct {
+	input   string
+	opts    []Option
+	wantErr string
+	want    fusedDoc
+}
+
+func runFusedErrorCases(t *testing.T, tests map[string]fusedErrorCase) {
+	t.Helper()
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, directErr, mapErr := decodeFusedBothPaths(t, tt.input, tt.opts...)
+			if diff := gocmp.Diff(tt.wantErr, errString(directErr)); diff != "" {
+				t.Errorf("direct struct path error mismatch for %q (-want +got):\n%s", tt.input, diff)
+			}
+			if diff := gocmp.Diff(tt.wantErr, errString(mapErr)); diff != "" {
+				t.Errorf("map[string]any path error mismatch for %q (-want +got):\n%s", tt.input, diff)
+			}
+			if tt.wantErr == "" {
+				if diff := gocmp.Diff(tt.want, got); diff != "" {
+					t.Errorf("decoded value mismatch for %q (-want +got):\n%s", tt.input, diff)
+				}
+			}
+		})
+	}
+}
+
+func TestDirectBindFusedStatementLineEnd(t *testing.T) {
+	t.Parallel()
+	runFusedErrorCases(t, map[string]fusedErrorCase{
+		"error: two assignments on one line": {
+			input:   "a=1 b=2\n",
+			wantErr: "toml: expected newline at line 1 col 5",
+		},
+		"error: table header followed by key on the same line": {
+			input:   "[table] name=\"x\"\n",
+			wantErr: "toml: expected newline at line 1 col 9",
+		},
+		"error: array-table header followed by key on the same line": {
+			input:   "[[pkgs]] name=\"x\"\n",
+			wantErr: "toml: expected newline at line 1 col 10",
+		},
+		"error: skipped unknown scalar followed by key": {
+			input:   "zz=1 a=2\n",
+			wantErr: "toml: expected newline at line 1 col 6",
+		},
+		"error: known string array followed by key": {
+			input:   "deps=[\"x\"] a=1\n",
+			wantErr: "toml: expected newline at line 1 col 12",
+		},
+		"error: skipped unknown string array followed by key": {
+			input:   "zz=[\"x\"] a=1\n",
+			wantErr: "toml: expected newline at line 1 col 10",
+		},
+		"error: second statement after header on a later line": {
+			input:   "[table]\nname=\"x\" deps=[]\n",
+			wantErr: "toml: expected newline at line 2 col 10",
+		},
+		"error: bare carriage return after value": {
+			input:   "a=1\rb=2\n",
+			wantErr: "toml: bare carriage return at line 1 col 4",
+		},
+		"error: control character in trailing comment": {
+			input:   "a=1 # \x01\nb=2\n",
+			wantErr: "toml: control character in comment at line 1 col 7",
+		},
+		"success: trailing comments after statements": {
+			input: "a=1 # one\nb=2\t# two\n[table] # t\nname=\"x\" # n\n",
+			want:  fusedDoc{A: 1, B: 2, Table: fusedPkg{Name: "x"}},
+		},
+		"success: CRLF line endings": {
+			input: "a=1\r\nb=2\r\n[[pkgs]]\r\nname=\"p\"\r\n",
+			want:  fusedDoc{A: 1, B: 2, Pkgs: []fusedPkg{{Name: "p"}}},
+		},
+		"success: trailing comment at end of input": {
+			input: "a=1\nb=2 # last",
+			want:  fusedDoc{A: 1, B: 2},
+		},
+	})
+}
+
+func TestDirectBindFusedStringArraySeparators(t *testing.T) {
+	t.Parallel()
+	runFusedErrorCases(t, map[string]fusedErrorCase{
+		"error: known array missing comma": {
+			input:   "deps=[\"x\" \"y\"]\n",
+			wantErr: "toml: expected array separator at line 1 col 11",
+		},
+		"error: known array missing comma before non-string": {
+			input:   "deps=[\"x\" 1]\n",
+			wantErr: "toml: expected array separator at line 1 col 11",
+		},
+		"error: known array missing comma across lines": {
+			input:   "deps=[\n  \"x\"\n  \"y\",\n]\n",
+			wantErr: "toml: expected array separator at line 3 col 3",
+		},
+		"error: known array leading comma": {
+			input:   "deps=[,\"x\"]\n",
+			wantErr: "toml: unexpected comma at line 1 col 7",
+		},
+		"error: known array double comma": {
+			input:   "deps=[\"x\",,\"y\"]\n",
+			wantErr: "toml: unexpected comma at line 1 col 11",
+		},
+		"error: known array only comma": {
+			input:   "deps=[,]\n",
+			wantErr: "toml: unexpected comma at line 1 col 7",
+		},
+		"error: known array only two commas": {
+			input:   "deps=[,,]\n",
+			wantErr: "toml: unexpected comma at line 1 col 7",
+		},
+		"error: known array equals after element": {
+			input:   "deps=[\"x\" = ]\n",
+			wantErr: "toml: unexpected equals at line 1 col 11",
+		},
+		"error: known array closing brace after element": {
+			input:   "deps=[\"x\" } ]\n",
+			wantErr: "toml: expected value at line 1 col 11",
+		},
+		"error: known array unterminated at end of input": {
+			input:   "deps=[\"x\",",
+			wantErr: "toml: expected value at line 1 col 11",
+		},
+		"error: unknown array missing comma": {
+			input:   "zz=[\"x\" \"y\"]\n",
+			wantErr: "toml: expected array separator at line 1 col 9",
+		},
+		"error: unknown array leading comma": {
+			input:   "zz=[,\"x\"]\n",
+			wantErr: "toml: unexpected comma at line 1 col 5",
+		},
+		"error: unknown array double comma": {
+			input:   "zz=[\"x\",,\"y\"]\n",
+			wantErr: "toml: unexpected comma at line 1 col 9",
+		},
+		"error: unknown array only comma": {
+			input:   "zz=[,]\n",
+			wantErr: "toml: unexpected comma at line 1 col 5",
+		},
+		"error: array-table element array missing comma": {
+			input:   "[[pkgs]]\ndeps=[\"x\" \"y\"]\n",
+			wantErr: "toml: expected array separator at line 2 col 11",
+		},
+		"success: empty and trailing-comma arrays": {
+			input: "deps=[\"x\",]\nzz=[]\nyy=[\"a\",\n]\n[table]\ndeps=[]\n",
+			want:  fusedDoc{Deps: []string{"x"}, Table: fusedPkg{Deps: []string{}}},
+		},
+	})
+}
+
+func TestDirectBindFusedStringArrayComments(t *testing.T) {
+	t.Parallel()
+	runFusedErrorCases(t, map[string]fusedErrorCase{
+		"error: known array control character in comment": {
+			input:   "deps=[\"x\", # \x01\n\"y\"]\n",
+			wantErr: "toml: control character in comment at line 1 col 14",
+		},
+		"error: known array bare carriage return ends comment": {
+			input:   "deps=[\"x\", # c\r\"y\"]\n",
+			wantErr: "toml: control character in comment at line 1 col 15",
+		},
+		"error: unknown array control character in comment": {
+			input:   "zz=[\"x\", # \x7f\n\"y\"]\n",
+			wantErr: "toml: control character in comment at line 1 col 12",
+		},
+		"success: comments inside arrays": {
+			input: "deps=[ # open\r\n\"x\", # one\n\"y\" # two\n]\nzz=[\"a\", # c\n]\n",
+			want:  fusedDoc{Deps: []string{"x", "y"}},
+		},
+	})
+}
+
+func TestDirectBindFusedLimits(t *testing.T) {
+	t.Parallel()
+	keyLimit := []Option{WithLimits(Limits{MaxKeyLength: 3})}
+	stringLimit := []Option{WithLimits(Limits{MaxStringLength: 3})}
+	runFusedErrorCases(t, map[string]fusedErrorCase{
+		"error: unknown bare key longer than MaxKeyLength": {
+			input:   "abcdefghij=1\n",
+			opts:    keyLimit,
+			wantErr: "toml: MaxKeyLength cap exceeded (limit=3, span=[0,10))",
+		},
+		"error: known bare key longer than MaxKeyLength": {
+			input:   "longname=1\n",
+			opts:    keyLimit,
+			wantErr: "toml: MaxKeyLength cap exceeded (limit=3, span=[0,8))",
+		},
+		"error: table header longer than MaxKeyLength": {
+			input:   "[table]\n",
+			opts:    keyLimit,
+			wantErr: "toml: MaxKeyLength cap exceeded (limit=3, span=[1,6))",
+		},
+		"error: table header padding counts toward MaxKeyLength": {
+			input:   "[ table ]\n",
+			opts:    []Option{WithLimits(Limits{MaxKeyLength: 5})},
+			wantErr: "toml: MaxKeyLength cap exceeded (limit=5, span=[1,8))",
+		},
+		"error: array-table header longer than MaxKeyLength": {
+			input:   "[[pkgs]]\n",
+			opts:    keyLimit,
+			wantErr: "toml: MaxKeyLength cap exceeded (limit=3, span=[2,6))",
+		},
+		"error: known string array element longer than MaxStringLength": {
+			input:   "deps=[\"abcdefghij\"]\n",
+			opts:    stringLimit,
+			wantErr: "toml: MaxStringLength cap exceeded (limit=3, span=[6,18))",
+		},
+		"error: unknown string array element longer than MaxStringLength": {
+			input:   "zz=['abcdefghij']\n",
+			opts:    stringLimit,
+			wantErr: "toml: MaxStringLength cap exceeded (limit=3, span=[4,16))",
+		},
+		"success: keys and strings within limits": {
+			input: "a=1\ndeps=[\"x\"]\n",
+			opts:  []Option{WithLimits(Limits{MaxKeyLength: 4, MaxStringLength: 3})},
+			want:  fusedDoc{A: 1, Deps: []string{"x"}},
+		},
+	})
 }

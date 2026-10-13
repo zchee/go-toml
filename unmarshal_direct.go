@@ -208,8 +208,11 @@ func directTypeContainsMap(t reflect.Type, seen map[reflect.Type]bool) (bool, er
 //	  "bar",
 //	]
 //
-// Nested arrays, inline tables, bare values, or trailing commas after complex
-// tokens fall through (ok=false) so the full skipper remains authoritative.
+// Anything outside that grammar falls through (ok=false) with dec untouched so
+// the generic skipper stays authoritative. The errors raised here are the ones
+// the token path reports for the same bytes: a comma where an element is due,
+// a string directly after a string, and the shared string, comment and
+// string-limit checks.
 func skipSimpleStringArrayValue(dec *Decoder) (bool, error) {
 	if dec == nil || dec.err != nil {
 		return false, nil
@@ -221,6 +224,9 @@ func skipSimpleStringArrayValue(dec *Decoder) (bool, error) {
 		return false, nil
 	}
 	i++
+	// expectElem is true after '[' and ',' (an element or ']' may follow) and
+	// false after an element (only ',' or ']' may follow).
+	expectElem := true
 	for i < len(buf) {
 		// whitespace + newlines
 		for i < len(buf) {
@@ -239,38 +245,48 @@ func skipSimpleStringArrayValue(dec *Decoder) (bool, error) {
 			break
 		}
 		if i >= len(buf) {
-			return false, dec.syntaxError("unterminated array", dec.off)
+			return false, nil
 		}
 		c := buf[i]
-		if c == ']' {
+		switch c {
+		case ']':
 			finishTopLevelArrayValue(dec, i+1)
 			return true, nil
-		}
-		if c == '#' {
-			// line comment inside array
-			for i < len(buf) && buf[i] != '\n' {
-				if buf[i] == '\r' {
-					break
-				}
-				i++
+		case '#':
+			end, err := dec.scanCommentEnd(i)
+			if err != nil {
+				return false, err
 			}
+			i = end
 			continue
-		}
-		if c == ',' {
+		case ',':
+			if expectElem {
+				return false, dec.syntaxError("unexpected comma", i)
+			}
+			expectElem = true
 			i++
 			continue
 		}
 		if c != '"' && c != '\'' {
 			return false, nil
 		}
+		if !expectElem {
+			return false, dec.syntaxError("expected array separator", i)
+		}
 		// string element
 		end, _, _, err := dec.scanString(i)
 		if err != nil {
 			return false, err
 		}
+		if end-i > dec.limits.MaxStringLength {
+			err := &LimitError{Limit: "MaxStringLength", Value: dec.limits.MaxStringLength, Span: [2]int{i, end}}
+			dec.setErr(err)
+			return false, err
+		}
+		expectElem = false
 		i = end
 	}
-	return false, dec.syntaxError("unterminated array", dec.off)
+	return false, nil
 }
 
 // commitFusedHeader consumes a fused [table] / [[array-table]] header ending
@@ -326,9 +342,23 @@ func tryBindArrayOrTableHeader(
 		if i+1 >= len(buf) || buf[i] != ']' || buf[i+1] != ']' {
 			return false, nil
 		}
-		i += 2
 	} else if i >= len(buf) || buf[i] != ']' {
 		return false, nil
+	}
+	// Like scanTableHeader and scanArrayTableHeader, the limit covers every
+	// byte between the brackets, padding included, whether or not the table
+	// is a known field.
+	keyOpen := start + 1
+	if array {
+		keyOpen++
+	}
+	if i-keyOpen > dec.limits.MaxKeyLength {
+		err := &LimitError{Limit: "MaxKeyLength", Value: dec.limits.MaxKeyLength, Span: [2]int{keyOpen, i}}
+		dec.setErr(err)
+		return false, err
+	}
+	if array {
+		i += 2
 	} else {
 		i++
 	}
@@ -415,7 +445,9 @@ func tryBindArrayOrTableHeader(
 }
 
 // bindFusedStringArray decodes a simple string array value starting at '['.
-// It is the bind counterpart of skipSimpleStringArrayValue.
+// It is the bind counterpart of skipSimpleStringArrayValue: anything outside
+// the simple grammar, including malformed input, rewinds to '[' and binds
+// through the generic array path, which then owns the diagnostics.
 func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error {
 	buf := dec.buf
 	start := dec.off
@@ -424,9 +456,22 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 		return dec.syntaxError("expected array", i)
 	}
 	i++
+	generic := func() error {
+		dec.off = start
+		dec.expectingValue = true
+		dec.valueNoNewline = true
+		tok, err := dec.scanValueToken()
+		if err != nil {
+			return err
+		}
+		return directBindTypedToken(dec, tok, dst, directValueArray, cfg)
+	}
 	// Capacity hint from a cheap span peek (no second string scan). setDirectStringSlice
 	// stores the header without reflect.ValueOf([]T) eface allocation.
 	out := make([]string, 0, simpleStringArrayCapHint(buf, start))
+	// expectElem is true after '[' and ',' (an element or ']' may follow) and
+	// false after an element (only ',' or ']' may follow).
+	expectElem := true
 	for i < len(buf) {
 		for i < len(buf) {
 			c := buf[i]
@@ -439,42 +484,44 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 					i += 2
 					continue
 				}
-				return dec.syntaxError("bare carriage return", i)
+				return generic()
 			}
 			break
 		}
 		if i >= len(buf) {
-			return dec.syntaxError("unterminated array", start)
+			return generic()
 		}
 		c := buf[i]
-		if c == ']' {
+		switch c {
+		case ']':
 			finishTopLevelArrayValue(dec, i+1)
 			setDirectStringSlice(dst, out)
 			return nil
-		}
-		if c == '#' {
-			for i < len(buf) && buf[i] != '\n' && buf[i] != '\r' {
-				i++
-			}
-			continue
-		}
-		if c == ',' {
-			i++
-			continue
-		}
-		if c != '"' && c != '\'' {
-			// Complex element: reset to '[' and use the generic array binder.
-			dec.off = start
-			dec.expectingValue = true
-			dec.valueNoNewline = true
-			tok, err := dec.scanValueToken()
+		case '#':
+			end, err := dec.scanCommentEnd(i)
 			if err != nil {
 				return err
 			}
-			return directBindTypedToken(dec, tok, dst, directValueArray, cfg)
+			i = end
+			continue
+		case ',':
+			if expectElem {
+				return generic()
+			}
+			expectElem = true
+			i++
+			continue
+		}
+		if !expectElem || (c != '"' && c != '\'') {
+			return generic()
 		}
 		end, _, flags, err := dec.scanString(i)
 		if err != nil {
+			return err
+		}
+		if end-i > dec.limits.MaxStringLength {
+			err := &LimitError{Limit: "MaxStringLength", Value: dec.limits.MaxStringLength, Span: [2]int{i, end}}
+			dec.setErr(err)
 			return err
 		}
 		tok := rawToken{Kind: TokenKindValueString, Bytes: buf[i:end], Offset: i, flags: flags}
@@ -483,9 +530,10 @@ func bindFusedStringArray(dec *Decoder, dst reflect.Value, cfg bindConfig) error
 			return err
 		}
 		out = append(out, s)
+		expectElem = false
 		i = end
 	}
-	return dec.syntaxError("unterminated array", start)
+	return generic()
 }
 
 // simpleStringArrayCapHint estimates element count for a top-level string array
@@ -597,6 +645,11 @@ func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directType
 	}
 
 	key := buf[off:keyEnd]
+	if len(key) > dec.limits.MaxKeyLength {
+		err := &LimitError{Limit: "MaxKeyLength", Value: dec.limits.MaxKeyLength, Span: [2]int{off, keyEnd}}
+		dec.setErr(err)
+		return false, err
+	}
 	// Advance past key, spaces, and '='. Direct bind disables position tracking.
 	dec.off = eq + 1
 	dec.atLineStart = false
@@ -696,6 +749,24 @@ func bindDocumentDirect(data []byte, dst reflect.Value, settings decoderSettings
 		// Fused path: top-level constructs without full readToken.
 		if !dec.expectingValue && dec.containerDepth == 0 {
 			dec.skipSpaces()
+			// skipSpaces consumes a newline and clears needLineEnd, so a set
+			// flag here means the previous statement is followed by something
+			// other than a line end on the same line. Mirror readToken.
+			if dec.needLineEnd && dec.off < len(dec.buf) {
+				switch dec.buf[dec.off] {
+				case '#':
+					end, err := dec.scanCommentEnd(dec.off)
+					if err != nil {
+						return err
+					}
+					dec.off = end
+					continue
+				case '\r':
+					return dec.syntaxError("bare carriage return", dec.off)
+				default:
+					return dec.syntaxError("expected newline", dec.off)
+				}
+			}
 			if dec.off < len(dec.buf) && dec.buf[dec.off] == '[' {
 				// [[array-table]] or [table]
 				handled, err := tryBindArrayOrTableHeader(dec, dst, &current, &currentInfo, &currentDirect, &currentPath, data, &arrayHintKey, &arrayHintCount)
