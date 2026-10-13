@@ -48,12 +48,14 @@ const (
 	quoteFallback = -2
 )
 
-var stringKeysPool sync.Pool
-var marshalBufferPool = sync.Pool{
-	New: func() any {
-		return new(bytes.Buffer)
-	},
-}
+var (
+	stringKeysPool    sync.Pool
+	marshalBufferPool = sync.Pool{
+		New: func() any {
+			return new(bytes.Buffer)
+		},
+	}
+)
 
 func init() {
 	reflectcache.EncodeFieldFallback = encodeReflectcacheField
@@ -70,30 +72,50 @@ func Marshal(v any) ([]byte, error) {
 	return marshalWithOptions(v, MarshalOptions{})
 }
 
-func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
-	hint := marshalSizeHint(v)
-	if hint > maxMarshalSizeHint {
-		var buf bytes.Buffer
-		if hint > 0 {
-			buf.Grow(hint)
-		}
-		if err := marshalToBufferDirect(&buf, v, opts); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
-	}
+// AppendMarshal appends the TOML encoding of v to dst and returns the extended
+// buffer. Prefer this over Marshal when reusing a buffer across encodes to
+// avoid allocating a fresh backing array every call.
+func AppendMarshal(dst []byte, v any) ([]byte, error) {
+	return appendMarshalWithOptions(dst, v, MarshalOptions{})
+}
 
-	buf := getMarshalBuffer()
-	if hint > 0 {
-		buf.Grow(hint)
+func marshalWithOptions(v any, opts MarshalOptions) ([]byte, error) {
+	// The size hint is an estimate that can overshoot the document by a wide
+	// margin, so encode into pooled scratch and return an exact-size copy
+	// instead of handing the caller a hint-sized backing array.
+	scratch := getMarshalBuffer()
+	if hint := marshalSizeHint(v); hint > 0 {
+		scratch.Grow(hint)
 	}
-	if err := marshalToBufferDirect(buf, v, opts); err != nil {
-		putMarshalBuffer(buf)
+	if err := marshalToBufferDirect(scratch, v, opts); err != nil {
+		putMarshalBuffer(scratch)
 		return nil, err
 	}
-	out := append([]byte(nil), buf.Bytes()...)
-	putMarshalBuffer(buf)
+	if scratch.Cap() > maxMarshalSizeHint {
+		// Too large to go back to the pool, so the caller can own it outright
+		// instead of paying for a second full-size allocation.
+		return scratch.Bytes(), nil
+	}
+	out := append([]byte(nil), scratch.Bytes()...)
+	putMarshalBuffer(scratch)
 	return out, nil
+}
+
+func appendMarshalWithOptions(dst []byte, v any, opts MarshalOptions) ([]byte, error) {
+	hint := marshalSizeHint(v)
+	if hint > 0 {
+		need := len(dst) + hint
+		if cap(dst) < need {
+			grown := make([]byte, len(dst), need)
+			copy(grown, dst)
+			dst = grown
+		}
+	}
+	buf := bytes.NewBuffer(dst)
+	if err := marshalToBufferDirect(buf, v, opts); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func getMarshalBuffer() *bytes.Buffer {

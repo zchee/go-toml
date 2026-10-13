@@ -189,12 +189,15 @@ func scanBasicStringStrictAVX2(s []byte) int {
 	bksl := archsimd.BroadcastUint8x32('\\')
 	del := archsimd.BroadcastUint8x32(0x7f)
 	control := archsimd.BroadcastUint8x32(0x1f)
+	tab := archsimd.BroadcastUint8x32('\t')
 	for i+32 <= len(s) {
 		v := archsimd.LoadUint8x32(s[i:])
+		// Probe includes tab (cheap LessEqual). On hit, drop tab lanes so
+		// TrailingZeros finds the real stop without a scalar re-scan.
 		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.Equal(del)).Or(v.LessEqual(control))
-		if m.ToBits() != 0 {
-			if n := scanBasicStringStrictScalar(s[i : i+32]); n < 32 {
-				return i + n
+		if b := m.ToBits(); b != 0 {
+			if exact := b &^ v.Equal(tab).ToBits(); exact != 0 {
+				return i + bits.TrailingZeros32(exact)
 			}
 		}
 		i += 32
@@ -206,12 +209,13 @@ func scanCommentBodyAVX2(s []byte) int {
 	i := 0
 	del := archsimd.BroadcastUint8x32(0x7f)
 	control := archsimd.BroadcastUint8x32(0x1f)
+	tab := archsimd.BroadcastUint8x32('\t')
 	for i+32 <= len(s) {
 		v := archsimd.LoadUint8x32(s[i:])
 		m := v.Equal(del).Or(v.LessEqual(control))
-		if m.ToBits() != 0 {
-			if n := scanCommentBodyScalar(s[i : i+32]); n < 32 {
-				return i + n
+		if b := m.ToBits(); b != 0 {
+			if exact := b &^ v.Equal(tab).ToBits(); exact != 0 {
+				return i + bits.TrailingZeros32(exact)
 			}
 		}
 		i += 32
@@ -382,12 +386,13 @@ func scanBasicStringStrictSSE2(s []byte) int {
 	bksl := archsimd.BroadcastUint8x16('\\')
 	del := archsimd.BroadcastUint8x16(0x7f)
 	control := archsimd.BroadcastUint8x16(0x1f)
+	tab := archsimd.BroadcastUint8x16('\t')
 	for i+16 <= len(s) {
 		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(quote).Or(v.Equal(bksl)).Or(v.Equal(del)).Or(v.LessEqual(control))
-		if m.ToBits() != 0 {
-			if n := scanBasicStringStrictScalar(s[i : i+16]); n < 16 {
-				return i + n
+		if b := m.ToBits(); b != 0 {
+			if exact := b &^ v.Equal(tab).ToBits(); exact != 0 {
+				return i + bits.TrailingZeros16(exact)
 			}
 		}
 		i += 16
@@ -399,12 +404,13 @@ func scanCommentBodySSE2(s []byte) int {
 	i := 0
 	del := archsimd.BroadcastUint8x16(0x7f)
 	control := archsimd.BroadcastUint8x16(0x1f)
+	tab := archsimd.BroadcastUint8x16('\t')
 	for i+16 <= len(s) {
 		v := archsimd.LoadUint8x16(s[i:])
 		m := v.Equal(del).Or(v.LessEqual(control))
-		if m.ToBits() != 0 {
-			if n := scanCommentBodyScalar(s[i : i+16]); n < 16 {
-				return i + n
+		if b := m.ToBits(); b != 0 {
+			if exact := b &^ v.Equal(tab).ToBits(); exact != 0 {
+				return i + bits.TrailingZeros16(exact)
 			}
 		}
 		i += 16

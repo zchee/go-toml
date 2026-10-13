@@ -21,9 +21,13 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/zchee/go-toml/internal/reflectcache"
 )
@@ -953,6 +957,177 @@ func TestMarshalSizeHintPositiveAndBounded(t *testing.T) {
 	huge := map[string]any{"payload": strings.Repeat("x", maxMarshalSizeHint+1)}
 	if got := marshalSizeHint(huge); got != maxMarshalSizeHint {
 		t.Fatalf("marshalSizeHint(huge) = %d, want cap %d", got, maxMarshalSizeHint)
+	}
+}
+
+// TestMarshalReturnsRightSizedBuffer guards Marshal against returning a
+// backing array sized by the encoder's size estimate, which can overshoot the
+// document by a third, and against returning memory the encoder reuses.
+//
+// It is not parallel: the reuse check depends on the next Marshal call drawing
+// the scratch buffer the previous one returned to the process-wide pool.
+func TestMarshalReturnsRightSizedBuffer(t *testing.T) {
+	type cargoPackage struct {
+		Name         string
+		Version      string
+		Source       string
+		Checksum     string
+		Dependencies []string `toml:"dependencies"`
+	}
+	type cargoLock struct {
+		Version int            `toml:"version"`
+		Package []cargoPackage `toml:"package"`
+	}
+	var lock cargoLock
+	if err := Unmarshal(mustReadRepoFile(t, parserBenchCorpusRel), &lock); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", parserBenchCorpusRel, err)
+	}
+	renamed := cargoLock{Version: lock.Version, Package: slices.Clone(lock.Package)}
+	for i := range renamed.Package {
+		renamed.Package[i].Name = strings.Repeat("x", len(renamed.Package[i].Name))
+	}
+
+	type rows struct {
+		Rows []string
+	}
+	hugeRows := func(fill string) rows {
+		row := strings.Repeat(fill, 1<<10)
+		return rows{Rows: slices.Repeat([]string{row}, maxMarshalSizeHint>>10+64)}
+	}
+
+	tests := map[string]struct {
+		value      any
+		other      any // encodes to the same length as value with different bytes
+		rightSized bool
+	}{
+		"success: small struct": {
+			value:      struct{ Name string }{Name: "demo"},
+			other:      struct{ Name string }{Name: "omed"},
+			rightSized: true,
+		},
+		"success: large document whose size estimate overshoots": {
+			value:      &lock,
+			other:      &renamed,
+			rightSized: true,
+		},
+		"success: document too large for the pooled buffer": {
+			value:      hugeRows("a"),
+			other:      hugeRows("b"),
+			rightSized: false,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			out, err := Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("Marshal(value) error = %v", err)
+			}
+			if len(out) == 0 {
+				t.Fatal("Marshal(value) returned an empty document")
+			}
+			// Allocator size classes round small objects up by at most 1/8 and
+			// large ones up to a page, so anything beyond that is estimate slack.
+			if slack, limit := cap(out)-len(out), len(out)/8+8192; tc.rightSized && slack > limit {
+				t.Errorf("Marshal(value) returned cap %d for %d bytes: slack %d, want <= %d", cap(out), len(out), slack, limit)
+			}
+
+			want := string(out)
+			other, err := Marshal(tc.other)
+			if err != nil {
+				t.Fatalf("Marshal(other) error = %v", err)
+			}
+			if len(other) != len(out) || string(other) == want {
+				t.Fatalf("Marshal(other) = %d bytes, want %d bytes that differ from Marshal(value)", len(other), len(out))
+			}
+			if string(out) != want {
+				t.Error("Marshal(value) result changed when Marshal(other) ran: the returned slice shares memory with the encoder")
+			}
+		})
+	}
+}
+
+// TestAppendMarshal is not parallel: testing.AllocsPerRun panics inside a
+// parallel test.
+func TestAppendMarshal(t *testing.T) {
+	type cfg struct {
+		Name  string
+		Count int
+	}
+	value := &cfg{Name: "demo", Count: 3}
+	body, err := Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := []byte("prefix:")
+	// AppendMarshal grows dst whenever its spare capacity is below the size
+	// hint, so a buffer that must be reused needs room for the larger of the
+	// hint and the real encoding.
+	room := len(prefix) + max(len(body), marshalSizeHint(value))
+
+	tests := map[string]struct {
+		dst       func() []byte
+		v         any
+		want      []byte
+		wantErr   error
+		wantReuse bool
+	}{
+		"success: appends after existing bytes": {
+			dst:  func() []byte { return slices.Clone(prefix) },
+			v:    value,
+			want: append(slices.Clone(prefix), body...),
+		},
+		"success: writes into spare capacity without reallocating": {
+			dst:       func() []byte { return append(make([]byte, 0, room), prefix...) },
+			v:         value,
+			want:      append(slices.Clone(prefix), body...),
+			wantReuse: true,
+		},
+		"success: nil dst": {
+			dst:  func() []byte { return nil },
+			v:    value,
+			want: body,
+		},
+		"error: encode failure returns nil": {
+			dst:     func() []byte { return append(make([]byte, 0, room), prefix...) },
+			v:       map[string]string{"bad\xffkey": "value"},
+			wantErr: errInvalidUTF8,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			dst := tt.dst()
+			got, err := AppendMarshal(dst, tt.v)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("AppendMarshal() error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr != nil {
+				if got != nil {
+					t.Fatalf("AppendMarshal() = %q with error, want nil", got)
+				}
+				return
+			}
+			if diff := cmp.Diff(string(tt.want), string(got)); diff != "" {
+				t.Fatalf("AppendMarshal() mismatch (-want +got):\n%s", diff)
+			}
+			if !tt.wantReuse {
+				return
+			}
+			if unsafe.SliceData(got) != unsafe.SliceData(dst) {
+				t.Fatalf("AppendMarshal() moved to a new backing array (cap %d -> %d), want dst reused", cap(dst), cap(got))
+			}
+			// Each run appends into the same spare capacity after the prefix.
+			// The one allowed allocation is the *bytes.Buffer header that
+			// appendMarshalWithOptions wraps dst in, which escapes into the
+			// encoder; a new backing array for the output would be a second.
+			allocs := testing.AllocsPerRun(100, func() {
+				if _, err := AppendMarshal(dst, tt.v); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if allocs > 1 {
+				t.Fatalf("AppendMarshal() into spare capacity allocs/op = %v, want at most 1 (the bytes.Buffer header)", allocs)
+			}
+		})
 	}
 }
 

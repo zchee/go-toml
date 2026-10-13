@@ -90,7 +90,7 @@ func TestDecoderTokenLineColCompatibilityFields(t *testing.T) {
 	t.Parallel()
 
 	input := []byte("# top\r\nnext = true\n")
-	tokens := mustReadAllTokens(t, NewDecoderBytes(input))
+	tokens := mustReadAllTokens(t, NewDecoderBytes(input, WithTokenPositions()))
 	wants := []struct {
 		name   string
 		index  int
@@ -233,7 +233,7 @@ func TestLineColForOffsetUsesLFCountOnlyWithCRDisplayRule(t *testing.T) {
 func TestParseDocumentSemanticErrorLineColumnFromTokenOffset(t *testing.T) {
 	t.Parallel()
 
-	_, err := parseDocument([]byte("a = 1\nb = 2\na = 3\n"), nil, nil)
+	_, err := parseDocument([]byte("a = 1\nb = 2\na = 3\n"), resolveDecoderSettings(nil), nil)
 	if err == nil {
 		t.Fatal("parseDocument() error = nil, want duplicate-key syntax error")
 	}
@@ -1343,5 +1343,198 @@ func TestUnmarshal_TOML11FinalConformanceEdges(t *testing.T) {
 				t.Fatalf("Unmarshal(%q) error = nil, want failure", tc.in)
 			}
 		})
+	}
+}
+
+const parserBenchCorpusRel = "testdata/corpus/cargo.lock"
+
+func TestResolveDecoderSettings(t *testing.T) {
+	t.Parallel()
+
+	defaults := Limits{
+		MaxNestedDepth:  DefaultMaxNestedDepth,
+		MaxKeyLength:    DefaultMaxKeyLength,
+		MaxStringLength: DefaultMaxStringLength,
+		MaxDocumentSize: DefaultMaxDocumentSize,
+	}
+	tests := map[string]struct {
+		opts []Option
+		want decoderSettings
+	}{
+		"success: no options yields defaults": {
+			opts: nil,
+			want: decoderSettings{limits: defaults},
+		},
+		"success: partial limits keep the other defaults": {
+			opts: []Option{WithLimits(Limits{MaxKeyLength: 7})},
+			want: decoderSettings{limits: Limits{
+				MaxNestedDepth:  DefaultMaxNestedDepth,
+				MaxKeyLength:    7,
+				MaxStringLength: DefaultMaxStringLength,
+				MaxDocumentSize: DefaultMaxDocumentSize,
+			}},
+		},
+		"success: every option is carried over": {
+			opts: []Option{
+				WithLimits(Limits{MaxNestedDepth: 3, MaxKeyLength: 5, MaxStringLength: 9, MaxDocumentSize: 11}),
+				WithLocalAsUTC(),
+				WithCopiedStrings(),
+				WithTokenPositions(),
+			},
+			want: decoderSettings{
+				limits:              Limits{MaxNestedDepth: 3, MaxKeyLength: 5, MaxStringLength: 9, MaxDocumentSize: 11},
+				localAsUTC:          true,
+				copyStrings:         true,
+				trackTokenPositions: true,
+			},
+		},
+		"success: later options override earlier ones": {
+			opts: []Option{WithTokenPositions(), withoutTokenPositions},
+			want: decoderSettings{limits: defaults},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := resolveDecoderSettings(tc.opts)
+			if diff := gocmp.Diff(tc.want, got, gocmp.AllowUnexported(decoderSettings{})); diff != "" {
+				t.Errorf("resolveDecoderSettings() mismatch (-want +got):\n%s", diff)
+			}
+
+			var dec Decoder
+			initDecoderBytes(&dec, []byte("a = 1\n"), got)
+			fromInit := decoderSettings{
+				limits:              dec.limits,
+				localAsUTC:          dec.localAsUTC,
+				copyStrings:         dec.copyStrings,
+				trackTokenPositions: dec.trackTokenPositions,
+			}
+			if diff := gocmp.Diff(tc.want, fromInit, gocmp.AllowUnexported(decoderSettings{})); diff != "" {
+				t.Errorf("initDecoderBytes() settings mismatch (-want +got):\n%s", diff)
+			}
+
+			public := NewDecoderBytes([]byte("a = 1\n"), tc.opts...)
+			fromPublic := decoderSettings{
+				limits:              public.limits,
+				localAsUTC:          public.localAsUTC,
+				copyStrings:         public.copyStrings,
+				trackTokenPositions: public.trackTokenPositions,
+			}
+			if diff := gocmp.Diff(tc.want, fromPublic, gocmp.AllowUnexported(decoderSettings{})); diff != "" {
+				t.Errorf("NewDecoderBytes() settings mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestWholeDocumentDecodeKeepsDecoderOffHeap guards the whole-document paths
+// against regaining a per-call Decoder allocation: an option closure that
+// receives the live decoder forces it onto the heap.
+func TestWholeDocumentDecodeKeepsDecoderOffHeap(t *testing.T) {
+	if checkptrInstrumented() {
+		t.Skip("checkptr instrumentation changes allocation counts")
+	}
+
+	input := []byte("name = \"demo\"\n")
+	tests := map[string]struct {
+		decode    func() error
+		maxAllocs float64
+	}{
+		"success: default settings initialize a stack decoder": {
+			decode: func() error {
+				var dec Decoder
+				initDecoderBytes(&dec, input, resolveDecoderSettings(nil))
+				_, err := dec.ReadToken()
+				return err
+			},
+			maxAllocs: 0,
+		},
+		"success: direct struct unmarshal": {
+			decode: func() error {
+				var dst struct{ Name string }
+				return Unmarshal(input, &dst)
+			},
+			maxAllocs: 1,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := tc.decode(); err != nil {
+				t.Fatalf("decode() error = %v", err)
+			}
+			var decodeErr error
+			allocs := testing.AllocsPerRun(1000, func() {
+				if err := tc.decode(); err != nil {
+					decodeErr = err
+				}
+			})
+			if decodeErr != nil {
+				t.Fatalf("decode() error = %v", decodeErr)
+			}
+			if allocs > tc.maxAllocs {
+				t.Errorf("allocs/run = %.0f, want <= %.0f", allocs, tc.maxAllocs)
+			}
+		})
+	}
+}
+
+func TestDecoder_NewDecoderBytes_AllocsPerRun(t *testing.T) {
+	sample := mustReadRepoFile(t, parserBenchCorpusRel)
+
+	constructorAllocs := testing.AllocsPerRun(100, func() {
+		_ = NewDecoderBytes(sample)
+	})
+	if constructorAllocs > 1 {
+		t.Fatalf("NewDecoderBytes(%q) allocs/run = %.0f, want <= 1", parserBenchCorpusRel, constructorAllocs)
+	}
+
+	const maxTokenStreamAllocs = 16
+	tokenStreamAllocs := testing.AllocsPerRun(25, func() {
+		dec := NewDecoderBytes(sample)
+		for {
+			_, err := dec.ReadToken()
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			t.Fatalf("token stream parse error = %v", err)
+		}
+	})
+	if tokenStreamAllocs > maxTokenStreamAllocs {
+		t.Fatalf("decode + read token stream allocs/run = %.0f, want <= %d", tokenStreamAllocs, maxTokenStreamAllocs)
+	}
+}
+
+func readAllTokensFromCorpus(sample []byte) error {
+	dec := NewDecoderBytes(sample)
+	for {
+		_, err := dec.ReadToken()
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+}
+
+func BenchmarkDecoderTokens_CargoLock(b *testing.B) {
+	body := mustReadRepoFile(b, parserBenchCorpusRel)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+
+	// warm-up once outside timer to avoid first-iteration overhead.
+	if err := readAllTokensFromCorpus(body); err != nil {
+		b.Fatalf("warm-up decode failed: %v", err)
+	}
+
+	for b.Loop() {
+		if err := readAllTokensFromCorpus(body); err != nil {
+			b.Fatalf("decode failed: %v", err)
+		}
 	}
 }
