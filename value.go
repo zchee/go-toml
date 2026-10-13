@@ -50,7 +50,6 @@ var documentMapPool = sync.Pool{
 
 //nolint:cyclop,funlen,gocognit,gocyclo // top-level TOML statement dispatch with table/array-table bookkeeping; cohesive state machine.
 func parseDocument(data []byte, settings decoderSettings, filter *decodeFilter) (documentMap, error) {
-	settings.trackTokenPositions = false
 	var decStorage Decoder
 	dec := &decStorage
 	initDecoderBytes(dec, data, settings)

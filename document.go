@@ -106,7 +106,7 @@ type documentPathInterner struct {
 func ParseDocument(data []byte) (*Document, error) {
 	raw := append([]byte(nil), data...)
 	entryHint := documentEntryHint(raw)
-	p := &documentParser{data: raw, dec: NewDecoderBytes(raw, withoutTokenPositions)}
+	p := &documentParser{data: raw, dec: NewDecoderBytes(raw)}
 	doc := &Document{
 		raw:     raw,
 		entries: make([]documentEntry, 0, entryHint),
@@ -562,7 +562,7 @@ func parseRawDocumentValue(raw []byte) (any, error) {
 	buf := make([]byte, 0, len(raw)+4)
 	buf = append(buf, 'x', ' ', '=', ' ')
 	buf = append(buf, raw...)
-	dec := NewDecoderBytes(buf, withoutTokenPositions)
+	dec := NewDecoderBytes(buf)
 	if tok, err := dec.ReadToken(); err != nil || tok.Kind != TokenKindKey {
 		if err != nil {
 			return nil, err

@@ -650,7 +650,7 @@ func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directType
 		dec.setErr(err)
 		return false, err
 	}
-	// Advance past key, spaces, and '='. Direct bind disables position tracking.
+	// Advance past key, spaces, and '='.
 	dec.off = eq + 1
 	dec.atLineStart = false
 
@@ -722,7 +722,6 @@ func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directType
 //
 //nolint:cyclop,funlen,gocognit,gocyclo // direct-decode token dispatch with table/array bookkeeping; cohesive state machine.
 func bindDocumentDirect(data []byte, dst reflect.Value, settings decoderSettings, cfg bindConfig) error {
-	settings.trackTokenPositions = false
 	var decStorage Decoder
 	dec := &decStorage
 	initDecoderBytes(dec, data, settings)
