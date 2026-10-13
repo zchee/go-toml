@@ -668,10 +668,11 @@ func tryBindSimpleAssignment(dec *Decoder, current reflect.Value, dt *directType
 // Decoder.ReadToken source of truth as the rest of the facade.
 //
 //nolint:cyclop,funlen,gocognit,gocyclo // direct-decode token dispatch with table/array bookkeeping; cohesive state machine.
-func bindDocumentDirect(data []byte, dst reflect.Value, opts []Option, cfg bindConfig) error {
+func bindDocumentDirect(data []byte, dst reflect.Value, settings decoderSettings, cfg bindConfig) error {
+	settings.trackTokenPositions = false
 	var decStorage Decoder
 	dec := &decStorage
-	initDecoderBytes(dec, data, decoderOptionsWithoutTokenPositions(opts)...)
+	initDecoderBytes(dec, data, settings)
 	current := dst
 	currentInfo, err := directStructInfo(current)
 	if err != nil {

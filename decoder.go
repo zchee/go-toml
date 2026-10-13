@@ -98,16 +98,52 @@ func withoutTokenPositions(d *Decoder) {
 	d.trackTokenPositions = false
 }
 
-var internalDecoderOptionsNoTokenPositions = []Option{withoutTokenPositions}
+// decoderSettings is the Decoder state that options can change.
+//
+// Options are opaque func values, so handing them the decoder that is being
+// initialized makes that decoder escape to the heap. Resolving them into this
+// value first lets the whole-document paths keep their Decoder on the stack.
+type decoderSettings struct {
+	limits              Limits
+	localAsUTC          bool
+	copyStrings         bool
+	trackTokenPositions bool
+}
 
-func decoderOptionsWithoutTokenPositions(opts []Option) []Option {
-	if len(opts) == 0 {
-		return internalDecoderOptionsNoTokenPositions
+func defaultLimits() Limits {
+	return Limits{
+		MaxNestedDepth:  DefaultMaxNestedDepth,
+		MaxKeyLength:    DefaultMaxKeyLength,
+		MaxStringLength: DefaultMaxStringLength,
+		MaxDocumentSize: DefaultMaxDocumentSize,
 	}
-	out := make([]Option, 0, len(opts)+1)
-	out = append(out, opts...)
-	out = append(out, withoutTokenPositions)
-	return out
+}
+
+// applyOptions resets d to the default settings, applies opts to it, and
+// returns the resulting settings.
+func (d *Decoder) applyOptions(opts []Option) decoderSettings {
+	d.limits = defaultLimits()
+	d.localAsUTC = false
+	d.copyStrings = false
+	d.trackTokenPositions = false
+	for _, opt := range opts {
+		opt(d)
+	}
+	return decoderSettings{
+		limits:              d.limits,
+		localAsUTC:          d.localAsUTC,
+		copyStrings:         d.copyStrings,
+		trackTokenPositions: d.trackTokenPositions,
+	}
+}
+
+// resolveDecoderSettings returns the settings opts select without exposing a
+// caller-owned Decoder to them. Only the with-options path allocates.
+func resolveDecoderSettings(opts []Option) decoderSettings {
+	if len(opts) == 0 {
+		return decoderSettings{limits: defaultLimits()}
+	}
+	return new(Decoder).applyOptions(opts)
 }
 
 // Decoder reads bytes as a token stream.
@@ -211,12 +247,7 @@ func NewDecoder(r io.Reader, opts ...Option) *Decoder {
 		col:                 1,
 		atLineStart:         true,
 		trackTokenPositions: false,
-		limits: Limits{
-			MaxNestedDepth:  DefaultMaxNestedDepth,
-			MaxKeyLength:    DefaultMaxKeyLength,
-			MaxStringLength: DefaultMaxStringLength,
-			MaxDocumentSize: DefaultMaxDocumentSize,
-		},
+		limits:              defaultLimits(),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -247,28 +278,22 @@ func NewDecoder(r io.Reader, opts ...Option) *Decoder {
 // NewDecoderBytes creates a Decoder over an in-memory TOML payload.
 func NewDecoderBytes(data []byte, opts ...Option) *Decoder {
 	d := &Decoder{}
-	initDecoderBytes(d, data, opts...)
+	initDecoderBytes(d, data, d.applyOptions(opts))
 	return d
 }
 
 // initDecoderBytes initializes d over data. d must be non-nil and zero or reusable.
-func initDecoderBytes(d *Decoder, data []byte, opts ...Option) {
+func initDecoderBytes(d *Decoder, data []byte, settings decoderSettings) {
 	*d = Decoder{
 		off:                 0,
 		line:                1,
 		col:                 1,
 		atLineStart:         true,
 		buf:                 data,
-		trackTokenPositions: false,
-		limits: Limits{
-			MaxNestedDepth:  DefaultMaxNestedDepth,
-			MaxKeyLength:    DefaultMaxKeyLength,
-			MaxStringLength: DefaultMaxStringLength,
-			MaxDocumentSize: DefaultMaxDocumentSize,
-		},
-	}
-	for _, opt := range opts {
-		opt(d)
+		limits:              settings.limits,
+		localAsUTC:          settings.localAsUTC,
+		copyStrings:         settings.copyStrings,
+		trackTokenPositions: settings.trackTokenPositions,
 	}
 	if d.limits.MaxDocumentSize > 0 && len(d.buf) > d.limits.MaxDocumentSize {
 		d.err = &LimitError{Limit: "MaxDocumentSize", Value: d.limits.MaxDocumentSize, Span: [2]int{0, d.limits.MaxDocumentSize}}

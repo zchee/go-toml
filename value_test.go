@@ -561,9 +561,9 @@ func TestDirectStringValueCopiedStringsBypassesArena(t *testing.T) {
 		t.Fatalf("copyStrings result pointer %#x is inside input buffer [%#x,%#x); want independent copy", p, inputBase, inputBase+uintptr(len(input)))
 	}
 
-	cfg := bindConfigFromOptions([]Option{WithCopiedStrings()})
+	cfg := resolveDecoderSettings([]Option{WithCopiedStrings()}).bindConfig()
 	if !cfg.copyStrings {
-		t.Fatal("bindConfigFromOptions(WithCopiedStrings()) copyStrings = false, want true")
+		t.Fatal("resolveDecoderSettings(WithCopiedStrings()).bindConfig() copyStrings = false, want true")
 	}
 }
 

@@ -57,22 +57,22 @@ func unmarshalWithOptions(data []byte, dst any, opts UnmarshalOptions) error {
 	if err != nil {
 		return err
 	}
+	settings := resolveDecoderSettings(opts.DecoderOptions)
+	cfg := settings.bindConfig()
 	if directEligible {
-		cfg := bindConfigFromOptions(opts.DecoderOptions)
-		return bindDocumentDirect(data, v.Elem(), opts.DecoderOptions, cfg)
+		return bindDocumentDirect(data, v.Elem(), settings, cfg)
 	}
 	filter, err := newDecodeFilter(v.Elem().Type())
 	if err != nil {
 		return normalizeReflectcacheError(err)
 	}
-	root, err := parseDocument(data, opts.DecoderOptions, filter)
+	root, err := parseDocument(data, settings, filter)
 	if err != nil {
 		return err
 	}
 	if canRecycleDocumentFor(v.Elem().Type()) {
 		defer recycleDocument(root)
 	}
-	cfg := bindConfigFromOptions(opts.DecoderOptions)
 	return bindValue(v.Elem(), root, cfg)
 }
 
@@ -81,15 +81,8 @@ type bindConfig struct {
 	copyStrings bool
 }
 
-func bindConfigFromOptions(opts []Option) bindConfig {
-	if len(opts) == 0 {
-		return bindConfig{}
-	}
-	decoder := &Decoder{}
-	for _, opt := range opts {
-		opt(decoder)
-	}
-	return bindConfig{localAsUTC: decoder.localAsUTC, copyStrings: decoder.copyStrings}
+func (s decoderSettings) bindConfig() bindConfig {
+	return bindConfig{localAsUTC: s.localAsUTC, copyStrings: s.copyStrings}
 }
 
 func canRecycleDocumentFor(t reflect.Type) bool {
